@@ -332,8 +332,7 @@ class SDM:
 
     def analytical_solution(self, t, x0, A, b):
         """ Analytical solution for a linear system of ODEs.
-        Note this solution only works for non-singular matrices.
-        That is, it only works without constant variables because these introduce rows/columns of zero in matrix A.
+            We use the Pseudo-inverse because the regular inverse only works for non-singular matrices.
         """
         A_inv = np.linalg.pinv(A)  # Pseudo-inverse for singular matrices
         I = np.identity(A.shape[0])

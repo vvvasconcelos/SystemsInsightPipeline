@@ -14,4 +14,4 @@ pip install systemdynamics
 ## Additional Information
 
 - If you encounter any issues, please ensure that you have all the necessary dependencies installed.
-- For more information, refer to the [documentation]() or [contact us]().
+- For more information, refer to the [documentation]() or [contact us](j.f.uleman@gmail.com).

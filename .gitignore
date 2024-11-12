@@ -79,3 +79,8 @@ instance/
 
 # Sphinx documentation
 docs/_build/
+
+# Notebook stuff
+.ipynb_checkpoints
+
+.DS_Store

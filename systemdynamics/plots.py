@@ -216,9 +216,9 @@ def plot_simulated_interventions(s, df_sol_per_sample, intervention_effects, int
 
     plt.tight_layout()
 
-    if s.save_results:
-        title = 'simulated_interventions_plots_per_N' + str(s.N) + '.jpg'
-        plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
+    # if s.save_results:
+    #     title = 'simulated_interventions_plots_per_N' + str(s.N) + '.jpg'
+    #     plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
 
     return fig
 
@@ -257,9 +257,9 @@ def plot_simulated_intervention(s, intervention_effects, interventions_to_plot=N
     plt.xlabel("Standardized effect after " + str(s.t_end) + " " + s.time_unit)
     plt.ylabel("")
     
-    if s.save_results:
-        title = 'simulated_interventions_ranking_plots_per_individual_N' + str(s.N) + '.jpg'
-        plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
+    # if s.save_results:
+    #     title = 'simulated_interventions_ranking_plots_per_individual_N' + str(s.N) + '.jpg'
+    #     plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
 
     return fig
 
@@ -294,9 +294,9 @@ def plot_simulated_intervention_ranking(s, intervention_effects, top_plot=None):
    plt.xlabel("Standardized effect after " + str(s.t_end) + " " + s.time_unit)
    plt.ylabel("")
    
-   if s.save_results:
-      title = 'simulated_interventions_ranking_plots_per_individual_N' + str(s.N) + '.jpg'
-      plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
+#    if s.save_results:
+#       title = 'simulated_interventions_ranking_plots_per_individual_N' + str(s.N) + '.jpg'
+#       plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
 
    return fig
 
@@ -321,9 +321,9 @@ def plot_feedback_loops_ranking(s, df_loops, intervention_effects, int_var=None,
     plt.xlabel("Contribution to average dynamics over time");  #(" + combine_loop_type + " over time)");
     plt.title("Top feedback loops for intervention on " + " ".join(int_var.split("_")));
 
-    if s.save_results:
-        title = 'feedback_loop_ranking_intervention_on_' + int_var +'_N_'+ str(s.N) + '.jpg'
-        plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
+    # if s.save_results:
+    #     title = 'feedback_loop_ranking_intervention_on_' + int_var +'_N_'+ str(s.N) + '.jpg'
+    #     plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
 
     return fig
 
@@ -360,9 +360,9 @@ def plot_feedback_loops_over_time(s, df_loops, intervention_effects, loopscores_
 
     plt.tight_layout()
 
-    if s.save_results:
-        title = 'feedback_loops_importance_over_time_intervention_on_' + int_var +'_N_'+ str(s.N) + '.jpg'
-        plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
+    # if s.save_results:
+    #     title = 'feedback_loops_importance_over_time_intervention_on_' + int_var +'_N_'+ str(s.N) + '.jpg'
+    #     plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
 
     return fig
 
@@ -406,8 +406,8 @@ def plot_feedback_loops_over_time_bounds(s, df_loops, intervention_effects, loop
         if j > num_loops - 3: 
             ax[j].set_xlabel(s.time_unit)
 
-    if s.save_results:
-        title = 'feedback_loops_importance_over_time_w_bounds_intervention_on_' + int_var +'_N_'+ str(s.N) + '.jpg'
-        plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
+    # if s.save_results:
+    #     title = 'feedback_loops_importance_over_time_w_bounds_intervention_on_' + int_var +'_N_'+ str(s.N) + '.jpg'
+    #     plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
 
     return fig

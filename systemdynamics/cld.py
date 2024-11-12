@@ -10,21 +10,14 @@ from types import SimpleNamespace
 from openpyxl import load_workbook
 
 class Extract:
-    def __init__(self, setting_name):
-        current_path = os.getcwd()
-        folders = current_path.split('/')
-        if folders.count("systemdynamics") > 1:
-            current_path = "/".join(current_path.split('/')[:-1])
-        self.current_path = current_path
-        file_path = os.path.join(current_path, f"{setting_name}.xlsx")
+    def __init__(self, file_path, settings_path): #file_path, settings_path):
         self.file_path = file_path
-        settings_path = os.path.join(current_path, f'{setting_name}.json')
-        self.setting_name = setting_name
         self.settings_path = settings_path
         self.variables = []
         self.var_to_type = {}
         self.adjacency_matrix = None
         self.interactions_matrix = None
+
         self.get_settings() # Get settings from the json file
         self.test_extraction()  # Call the test_extraction function when the class is loaded
 
@@ -34,19 +27,20 @@ class Extract:
         with open(self.settings_path) as f:
             settings = json.load(f)
         s = SimpleNamespace(**settings)
-        s.setting_name = self.setting_name
-        curr_time = (str(datetime.datetime.now())[0:10])  # Create a new folder for each date
+        
+        # s.setting_name = self.setting_name
+        # curr_time = (str(datetime.datetime.now())[0:10])  # Create a new folder for each date
 
-        if s.save_results:  # Create a directory to store results
-            folder_path = os.path.join(self.current_path,"Results", f"{curr_time}_{self.setting_name}")
+        # if s.save_results:  # Create a directory to store results
+        #     folder_path = os.path.join(self.current_path,"Results", f"{curr_time}_{self.setting_name}")
             
-            if not os.path.exists(folder_path):
-                os.mkdir(folder_path)
+        #     if not os.path.exists(folder_path):
+        #         os.mkdir(folder_path)
 
-            with open(os.path.join(folder_path, f"used_settings_{self.setting_name}.json"), 'w+') as f:
-                json.dump(settings, f, indent=2)  # Store current settings
+        #     with open(os.path.join(folder_path, f"used_settings_{self.setting_name}.json"), 'w+') as f:
+        #         json.dump(settings, f, indent=2)  # Store current settings
 
-            s.save_path = os.path.join("Results", curr_time + '_' + self.setting_name + "/")  # Path for saving the results
+        #     s.save_path = os.path.join("Results", curr_time + '_' + self.setting_name + "/")  # Path for saving the results
         self.s = s
 
     def extract_settings(self):
@@ -58,7 +52,6 @@ class Extract:
 
         if s.interaction_terms:
             if np.abs(interactions_matrix).sum() > 0:
-                #s.interaction_terms = True
                 print("Solving an SDM with interaction terms.")
                 if s.solve_analytically and s.interaction_terms:
                     print("Cannot solve analytically with interaction terms so will proceed with numerical solution.")
@@ -104,9 +97,9 @@ class Extract:
         s.intervention_variables = [var for var in s.variables if var != s.variable_of_interest]  
 
         # If double factor interventions selected, add double factor interventions 
-        #if s.double_factor_interventions and s.interaction_terms == False:
-            #warnings.warn("Without interaction terms, double factor interventions are not meaningful. Consider setting double_factor_interventions to False.")
-            #s.double_factor_interventions = 0
+        if s.double_factor_interventions and s.interaction_terms == False:
+            warnings.warn("Without interaction terms, double factor interventions are not meaningful. Consider setting double_factor_interventions to False.")
+            # s.double_factor_interventions = 0
 
         if s.double_factor_interventions:
             double_intervention_variables = []
@@ -213,7 +206,6 @@ class Extract:
 
                 # Add polarity to interactions matrix
                 self.interactions_matrix[destination_index, origin_2_index, origin_1_index] = polarity
-        
 
     def adjacency_matrix_from_kumu(self):
         """Run the CLD analysis by extracting the adjacency matrix and interactions matrix."""
