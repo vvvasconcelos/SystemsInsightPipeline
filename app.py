@@ -3,97 +3,107 @@ from tempfile import TemporaryDirectory
 import os
 from systemdynamics.cld import Extract
 from systemdynamics.sdm import SDM
-from systemdynamics.plots import plot_simulated_interventions, plot_simulated_intervention_ranking
-from systemdynamics.plots import plot_feedback_loops_ranking, plot_feedback_loops_over_time
-
+from systemdynamics.plots import plot_simulated_intervention_ranking
+import sys
+import io
 st.title('Diagrams to Dynamics: A System Dynamics Analysis of a Causal Loop Diagram')
 
-# Upload files
+# Upload file
 uploaded_kumu_excel = st.file_uploader("Upload an Excel file (xlsx)", type="xlsx")
-uploaded_json = st.file_uploader("Upload a json settings file", type="json")
 
-if uploaded_kumu_excel is not None and uploaded_json is not None:
-    #current_path = os.getcwd()
-    #temp_dir = TemporaryDirectory(dir=current_path) #tempfile.mkdtemp(dir=current_path)
+# Input fields (values stored but simulation doesn't run immediately)
+# N = st.text_input("Enter the number of simulations to run (default 100)", "100")
+# time_unit = st.text_input("Enter the base unit of time (default: Months)", "Months")
+# t_end = st.text_input("Enter the final simulation time point in specified time units (default: 12)", "12")
+# parameter_value = st.text_input("Enter the maximum parameter value theta (default 0.5)", "0.5")
+# Initialize session state variables if they don't exist
+if "N" not in st.session_state:
+    st.session_state.N = "100"
+if "time_unit" not in st.session_state:
+    st.session_state.time_unit = "Months"
+if "t_end" not in st.session_state:
+    st.session_state.t_end = "12"
+if "parameter_value" not in st.session_state:
+    st.session_state.parameter_value = "0.5"
+if "seed" not in st.session_state:
+    st.session_state.seed = "1912884"
+
+# User inputs linked to session state
+N = st.text_input("Enter the number of simulations to run (default 100)", st.session_state.N)
+time_unit = st.text_input("Enter the base unit of time (default: Months)", st.session_state.time_unit)
+t_end = st.text_input("Enter the final simulation time point (default: 12)", st.session_state.t_end)
+parameter_value = st.text_input("Enter the max parameter value theta (default 0.5)", st.session_state.parameter_value)
+seed = st.text_input("Enter a seed for reproducibility (leave blank for random)", st.session_state.seed)
+
+# Update session state when user changes input
+if N != st.session_state.N:
+    st.session_state.N = N
+if time_unit != st.session_state.time_unit:
+    st.session_state.time_unit = time_unit
+if t_end != st.session_state.t_end:
+    st.session_state.t_end = t_end
+if parameter_value != st.session_state.parameter_value:
+    st.session_state.parameter_value = parameter_value
+# Update seed in session state
+if seed != st.session_state.seed:
+    st.session_state.seed = seed
+
+# Button to confirm and run the simulation
+if st.button("Run Simulation") and uploaded_kumu_excel is not None:
     with TemporaryDirectory() as temp_dir:
         file_path = os.path.join(temp_dir, uploaded_kumu_excel.name)
-        settings_path = os.path.join(temp_dir, uploaded_json.name)
-
-        with open(settings_path, "wb") as f:
-            f.write(uploaded_json.getvalue())
 
         with open(file_path, "wb") as f:
             f.write(uploaded_kumu_excel.getvalue())
 
-        # Check if we've already processed the input files
-        if 'processed' not in st.session_state:
-            # Process files
-            extract = Extract(file_path, settings_path)  # Load the relevant Kumu file extraction module
-            s = extract.extract_settings()  # Extract the settings using the json file and the Kumu table
-            sdm = SDM(s.df_adj, s.interactions_matrix, s)  # Load the module for formulating and simulating the SDM
+        # Process files
+        extract = Extract(file_path)
+        s = extract.extract_settings()
 
-            st.session_state.s = s
-            st.session_state.sdm = sdm
+        # Convert inputs
+        s.N = int(N)
+        s.t_end = int(t_end)
+        s.time_unit = time_unit
+        s.parameter_value = float(parameter_value)
+        s.prior = "uniform"
+        # Set seed (random if left blank)
+        s.seed = int(seed) if seed.strip() else None
 
-            st.write("The following settings are used:")
-            for sett in ["N", "time_unit", "t_end", "dt", "variable_of_interest", "max_parameter_value",
-                        "double_factor_interventions", "solve_analytically"]:
-                st.write(sett, "=", vars(s)[sett])
 
-            # Run simulations and store the results in session state
-            df_sol, param_samples = sdm.run_simulations()  # Run the simulated interventions
-            intervention_effects = sdm.get_intervention_effects()  # Get the intervention effects
+        sdm = SDM(s)
+        st.session_state.s = s
+        st.session_state.sdm = sdm
 
-            st.session_state.df_sol = df_sol
-            st.session_state.param_samples = param_samples
-            st.session_state.intervention_effects = intervention_effects
+        # Run simulations
+        st.subheader("Simulated Intervention Rankings")
 
-            top_plot = None  # Number of top interventions to plot
-            fig_var_rank = plot_simulated_intervention_ranking(s, intervention_effects, top_plot=top_plot)  # Plot the simulated interventions ranking
-            st.write("\n -------- Simulated intervention results -------- ")
+        df_sol, param_samples, eig_val_vec = sdm.run_simulations()
+        intervention_effects_per_voi = sdm.get_intervention_effects()
+
+        st.session_state.df_sol = df_sol
+        st.session_state.param_samples = param_samples
+        st.session_state.intervention_effects = intervention_effects_per_voi
+
+        # Display results
+        for voi in s.variable_of_interest:
+            fig_var_rank = plot_simulated_intervention_ranking(s, intervention_effects_per_voi[voi], voi)
             st.pyplot(fig_var_rank)
 
-            fig_var_traj = plot_simulated_interventions(s, df_sol, intervention_effects, interval_type="percentile", confidence_bounds=.95, top_plot=top_plot)  # Plot the simulated interventions
-            st.pyplot(fig_var_traj)
+    # Sensitivity Analysis
+    cut_off_SA_importance = 0.05
+    int_var = None
+    st.subheader("Sensitivity Analysis Results (>rho=0.05)")
 
-            # Mark processing as done
-            st.session_state.processed = True
-        else:
-            # If already processed, load from session state
-            s = st.session_state.s
-            sdm = st.session_state.sdm
-            df_sol = st.session_state.df_sol
-            param_samples = st.session_state.param_samples
-            intervention_effects = st.session_state.intervention_effects
+    for voi in s.variable_of_interest:
+        st.write(f"**Variable of Interest: {voi}**")  # Display VOI in bold
+        # Capture print output
+        output_buffer = io.StringIO()
+        sys.stdout = output_buffer  # Redirect print statements to buffer
 
-            st.write("The following settings are used:")
-            for sett in ["N", "time_unit", "t_end", "dt", "variable_of_interest", "max_parameter_value",
-                        "double_factor_interventions", "solve_analytically"]:
-                st.write(sett, "=", vars(s)[sett])
-            print("\n -------- Now select the 'what-if' scenario to analyze -------- \n")
+        SA_results, df_SA = sdm.run_SA(voi, int_var, cut_off_SA_importance)
 
-        # User input for intervention variable of interest
-        intervention_options = list(intervention_effects.keys())
-        int_var = st.selectbox("Select the intervention variable of interest:", intervention_options)  # User selects the intervention variable
-        
-        # Feedback loop analysis
-        df_loops, loopscores_per_sample = sdm.run_loops_that_matter(int_var)  # Run the feedback loop analysis
+        sys.stdout = sys.__stdout__  # Reset stdout to normal
+    
+        # Display captured output in Streamlit
+        st.text(output_buffer.getvalue()) 
 
-        cut_off_loop_importance = 0.05
-        fig_fb_rank = plot_feedback_loops_ranking(s, df_loops, intervention_effects, int_var, cut_off_loop_importance)
-        st.write("\n -------- Feedback loop analysis result for the intervention on " + str(int_var) +
-                " with cut-off off >" + str(cut_off_loop_importance), "--------")
-        st.pyplot(fig_fb_rank)
-
-        fig_fb_traj = plot_feedback_loops_over_time(s, df_loops, intervention_effects, loopscores_per_sample, int_var, cut_off_loop_importance)
-        st.pyplot(fig_fb_traj)
-
-        cut_off_SA_importance = 0.05
-        input_var = True  # If True, the top-ranked intervention variable will be used
-        outcome_var = False  # If True, the variable of interest will be used
-        SA_results, df_SA = sdm.run_SA(outcome_var, input_var, int_var, cut_off_SA_importance)
-        SA_results = SA_results.loc[SA_results > cut_off_SA_importance]
-        st.write("\n -------- Sensitivity analysis result for the intervention on " + str(int_var) + " with respect to " + 
-                s.variable_of_interest, " with cut-off of rho>" + str(cut_off_SA_importance), "--------")
-        for par in SA_results.index:
-            st.write(par + ": " + str(SA_results.loc[par]))

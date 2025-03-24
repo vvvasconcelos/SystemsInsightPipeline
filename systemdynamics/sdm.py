@@ -11,11 +11,11 @@ from tqdm import tqdm
 from tabulate import tabulate
 
 class SDM:
-    def __init__(self, df_adj, interactions_matrix, s):
-        self.df_adj = df_adj
+    def __init__(self, s):
+        self.df_adj = s.df_adj
         self.df_adj_incl_interactions = s.df_adj_incl_interactions
         self.N = s.N
-        self.interactions_matrix = interactions_matrix
+        self.interactions_matrix = s.interactions_matrix
         self.interaction_terms = s.interaction_terms
         self.solve_analytically = s.solve_analytically
         self.stability_analysis = True
