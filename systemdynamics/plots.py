@@ -5,6 +5,7 @@ import scipy
 import scipy.stats
 import pandas as pd
 import ipywidgets as widgets
+import pandas as pd
 from IPython.display import display
 sns.set_theme()
 
@@ -222,7 +223,6 @@ def plot_simulated_interventions(s, df_sol_per_sample, intervention_effects, int
 
     return fig
 
-
 def plot_simulated_intervention(s, intervention_effects, interventions_to_plot=None):
     """ 
     Plot simulated intervention effects in a horizontal boxplot, ranked by median.
@@ -263,42 +263,42 @@ def plot_simulated_intervention(s, intervention_effects, interventions_to_plot=N
 
     return fig
 
-
-def plot_simulated_intervention_ranking(s, intervention_effects, top_plot=None):
+def plot_simulated_intervention_ranking(s, intervention_effects, voi, top_plot=None, order=None):
    """ Plot simulated intervention effects in a horizontal boxplot, ranked by median.
    """
    df_SA = pd.DataFrame(intervention_effects)
    df_SA = df_SA.reindex(columns=list(
-                        df_SA.abs().median().sort_values(ascending=False).index))
-   df_SA = df_SA.rename(mapper=dict(
-                        zip(df_SA.columns,
-                           [" ".join(var.split("_")) for var in df_SA.columns])), axis=1)
+      df_SA.abs().median().sort_values(ascending=False).index))
+   
+   if top_plot is not None:
+      df_SA = df_SA[list(df_SA.columns)[:top_plot]]  # Take only the top X interventions to plot
 
-   palette_dict = {var : "#4682B4" for var in df_SA.columns}  # Blue for positive effects
-   medians = df_SA.median()
-   lower_than_zero_vars = medians.loc[medians < 0].index
-   for var in lower_than_zero_vars:
-      palette_dict[var] = "#FF6347"  # Red for negative effects
-   palette = list(palette_dict.values())  # Convert to list
+   if order is not None:
+      df_SA = df_SA[order]
 
-   df_SA = df_SA.abs()
-   if top_plot != None:
-       df_SA = df_SA[list(df_SA.columns)[:top_plot]]  #  Take only the top X interventions to plot
+   if voi in df_SA.columns:
+      df_SA = df_SA.drop(voi, axis=1)  # Remove the variable of interest as intervention variable from the plot
+
+   name_with_intervention = [" ".join(var.split("_")) + " (" + str(s.intervention_effects[var]) + ")" 
+                             if s.intervention_effects[var] == -1 else 
+                             " ".join(var.split("_")) + " (+" + str(s.intervention_effects[var]) + ")" 
+                             for var in df_SA.columns]
+   df_SA = df_SA.rename(mapper=dict(zip(df_SA.columns, name_with_intervention)), axis=1)
+   
+   # Define a consistent color palette for variables
+   unique_vars = df_SA.columns
+   palette_dict = {var: sns.color_palette("husl", len(unique_vars))[i] for i, var in enumerate(unique_vars)}
+   palette = [palette_dict[var] for var in df_SA.columns]
 
    fig = plt.figure(figsize=(5, 8))
    ax = fig.add_subplot(111)
    sns.boxplot(data=df_SA, showfliers=False, whis=True, orient='h', palette=palette)
-   plt.vlines(x=0, ymin=-0.5, ymax=len(df_SA.columns) -
-               0.6, colors='black', linestyles='dashed')
-   plt.title("Effect on " + " ".join(s.variable_of_interest.split("_")))
+   plt.vlines(x=0, ymin=-0.5, ymax=len(df_SA.columns) - 0.6, colors='black', linestyles='dashed')
+   plt.title("Effect on " + " ".join(voi.split("_")))
    plt.xlabel("Standardized effect after " + str(s.t_end) + " " + s.time_unit)
    plt.ylabel("")
-   
-#    if s.save_results:
-#       title = 'simulated_interventions_ranking_plots_per_individual_N' + str(s.N) + '.jpg'
-#       plt.savefig(s.save_path + title, format='jpg', dpi=300, bbox_inches='tight')
-
    return fig
+
 
 def plot_feedback_loops_ranking(s, df_loops, intervention_effects, int_var=None, cut_off_importance=0.1):
     """ Create a ranked box plot of average feedback loop scores.
