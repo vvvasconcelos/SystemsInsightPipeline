@@ -123,7 +123,7 @@ class SDM:
     
         return sorted_p_values, df_SA
 
-    def run_simulations(self):
+    def run_simulations(self, progress_callback=None):
         """ Run the simulations for N iterations for all the specified interventions
         """
         df_sol_per_sample = []  # List for storing the solution dataframes
@@ -135,7 +135,7 @@ class SDM:
             eigenvalues_imag = np.zeros((self.N, len(self.stocks_and_constants)))
             eig_val_vec = {"Eigenvalues": [], "Eigenvectors" : []}
 
-        for num in tqdm(range(self.N)):  # Iterate over the number of samples
+        for num in tqdm(range(self.N), desc="Running Simulations"):  # Iterate over the number of samples
             df_sol = []
 
             params_i = self.sample_model_parameters() #s.intervention_auxiliaries)  # Sample model parameters
@@ -190,6 +190,10 @@ class SDM:
 
             df_sol_per_sample += [df_sol]
 
+            # If a progress callback is provided, update progress (for Streamlit app)
+            if progress_callback:
+                progress_callback(i + 1, self.N)
+    
         self.df_sol_per_sample = df_sol_per_sample
         self.param_samples = param_samples
         return df_sol_per_sample, param_samples, eig_val_vec #df_stability
