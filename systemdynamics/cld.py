@@ -232,10 +232,12 @@ class Extract:
         
         # Extract variables from the Elements 
         self.variables = list(df_e["Label"])
-        self.var_to_type = dict(zip(list(df_e["Label"]), list(df_e["Type"])))
+        self.variables = [var.replace("-", "") for var in self.variables]  # Ensure the variable names are formatted without dashes
+        self.variables = [var.replace("/", "") for var in self.variables]  # Ensure the variable names are formatted without slashes
+        self.var_to_type = dict(zip(self.variables, list(df_e["Type"])))
         self.intervention_variables = list(df_e.loc[(df_e["Tags"] == -1)*1 +
                                                     (df_e["Tags"] == 1)*1 > 0, "Label"])
-        self.intervention_effects = dict(zip(list(df_e.loc[:, "Label"]), list(df_e.loc[:, "Tags"])))
+        self.intervention_effects = dict(zip(self.variables, list(df_e.loc[:, "Tags"])))
         self.variable_of_interest = list(df_e.loc[df_e["Description"] == "VOI", "Label"])
 
         if len(self.variable_of_interest) == 1:

@@ -63,6 +63,8 @@ coverage.xml
 # Tutorials
 tutorials/Sleep_estimation.ipynb
 tutorials/YAMH_original_labeling.xlsx
+tutorials/Social_norms_SFD.xlsx
+
 
 # Translations
 *.mo

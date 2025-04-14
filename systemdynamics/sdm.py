@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from scipy.integrate import solve_ivp
 import scipy
+import re
 from copy import deepcopy
 from sympy.parsing.sympy_parser import parse_expr
 from scipy.stats import halfnorm
@@ -328,22 +329,37 @@ class SDM:
                                                 for pred in new_params[var]]) for var in self.stocks_and_auxiliaries}
 
         new_equations = original_equations
-        for k, var in enumerate(original_equations):
-            eq = original_equations[var]
 
+        # print("Original equations: ", original_equations)
+
+        def contains_aux(eq, auxiliaries):
+            for aux in auxiliaries:
+                pattern = r'\b' + re.escape(aux) + r'\b'
+                if re.search(pattern, eq):
+                    return True
+            return False
+        
+        for k, var in enumerate(self.auxiliaries + self.stocks):  # Iterate over all variables, starting with auxiliaries
+            eq = original_equations[var]
+            # print("Eq before change: ", eq)
             if np.any([aux in eq for aux in self.auxiliaries]):  # If the equation contains auxiliaries
                 count = 0 
-                while np.any([aux in eq for aux in self.auxiliaries]):  # Iterate until all auxiliaries are removed from the equations
-                    for aux in self.auxiliaries:
-                        eq = eq.replace(aux, "( " + aux + " )")
-                        eq = eq.replace(aux, new_equations[aux])
+                while contains_aux(eq, self.auxiliaries):
+                #np.any([aux in eq for aux in self.auxiliaries]):  # Iterate until all auxiliaries are removed from the equations
+                    for aux in sorted(self.auxiliaries, key=len, reverse=True):  # sort longest names first!
+                        pattern = r'\b' + re.escape(aux) + r'\b'  # match whole words only
+                        eq = re.sub(pattern, f"( {new_equations[aux]} )", eq)
+                        
+                        #eq = eq.replace(aux, "( " + aux + " )")
+                        #eq = eq.replace(aux, new_equations[aux])
+                        #print(eq)
                     eq_sym = sym.simplify(parse_expr(eq))
                     eq = str(eq_sym)
                     
                     count += 1
 
                     if count == 20: ### Temporary warning to prevent infinite loops; will be removed later by informative warning regarding feedback between auxiliaries
-                        print("Was unable to get rid of the auxiliaries in eq for var: ", var, " = ", eq_sym)
+                        print("Was unable to get rid of the auxiliaries in eq for var: ", var, " = ", eq_sym, "\n")
                         break
 
                 eq_sym_exp = sym.expand(eq_sym)  # Expand the equation to get rid of parentheses
@@ -354,6 +370,7 @@ class SDM:
                     new_params[var]["Intercept"] = new_params[var]["1"]  # Rename the "1" key to "Intercept"
                     new_params[var] = {key : new_params[var][key] for key in new_params[var] if key != "1"}  # Remove the "1" key
 
+       # new_params = {var : new_params[var] for var in self.stocks_and_auxiliaries} 
         self.new_params = new_params
         return new_params
 
