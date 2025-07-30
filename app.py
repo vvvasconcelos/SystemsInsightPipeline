@@ -6,7 +6,7 @@ from systemdynamics.sdm import SDM
 from systemdynamics.plots import plot_simulated_intervention_ranking
 import sys
 import io
-st.title('Diagrams to Dynamics: A System Dynamics Analysis of a Causal Loop Diagram')
+st.title('Diagrams-to-Dynamics (D2D): Exploring Causal Loop Diagram Leverage Points under Uncertainty')
 
 # Upload file
 uploaded_kumu_excel = st.file_uploader("Upload an Excel file (xlsx)", type="xlsx")
