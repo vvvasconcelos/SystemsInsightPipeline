@@ -28,12 +28,28 @@ class SDM:
         self.simulate_interventions = s.simulate_interventions
         self.variables = s.variables
         self.stocks = s.stocks
-        self.parameter_value = s.parameter_value
+        self.parameter_value_stocks = s.parameter_value_stocks
+        self.parameter_value_aux = s.parameter_value_aux
         self.variable_of_interest = s.variable_of_interest
         self.intervention_variables = s.intervention_variables
-        self.prior = s.prior
+        self.prior = "uniform"  # s.prior
         self.intervention_effects = s.intervention_effects
         np.random.seed(s.seed)  # Set seed for reproducibility
+
+        self.num_pars_stocks = int((self.df_adj.loc[self.stocks, :] != 0).sum().sum())
+        self.num_pars_auxiliaries = int((self.df_adj.loc[self.auxiliaries, :] != 0).sum().sum())
+
+        stock_indices = [s.variables.index(stock) for stock in self.stocks]
+        aux_indices = [s.variables.index(aux) for aux in self.auxiliaries]
+        self.num_pars_int_stocks = int(self.interactions_matrix[np.ix_(stock_indices,
+                                                                   np.arange(self.interactions_matrix.shape[1]),
+                                                                   np.arange(self.interactions_matrix.shape[2]))].sum().sum())
+        self.num_pars_int_auxiliaries = int(self.interactions_matrix[np.ix_(aux_indices,
+                                                                        np.arange(self.interactions_matrix.shape[1]),
+                                                                        np.arange(self.interactions_matrix.shape[2]))].sum().sum())
+
+        # self.num_pars_int_stocks = int(np.abs(self.interactions_matrix[self.stocks, :, :]).sum().sum())
+        # self.num_pars_int_auxiliaries = int(np.abs(self.interactions_matrix[self.auxiliaries, :, :]).sum().sum())
 
         # Set the SDM simulation timesteps to store 
         s.dt = 1  # Time step for the simulation, only for non-analytical solutions #TO DO ADJUST
@@ -61,67 +77,65 @@ class SDM:
     def flatten(self, xss):
         return [x for xs in xss for x in xs]
 
-    def run_SA(self, outcome_var, int_var, cut_off_SA_importance=0.1):
-        """ Run sensitivity analysis for the model parameters, either for a specific intervention (int_var) or over all interventions
+    def run_SA(self, outcome_var, int_var, cut_off_SA_importance=0.1, n_bootstraps=200):
+        """ Run sensitivity analysis for the model parameters, either for a specific intervention (int_var) or over all interventions,
+            and compute bootstrap confidence intervals for correlation coefficients.
         """  
-        #if input_var:
-        if int_var == None:
+        if int_var is None:
             loop_over = self.intervention_variables
-            #if int_var == None:
-            #    loop_over = [list(self.intervention_effects.keys())[0]]
-           # else:
-            #    loop_over = [int_var]
         else:
-            #loop_over = self.intervention_variables
             loop_over = [int_var]
 
-        param_names = self.flatten([[source+"->"+target for source in self.param_samples[self.intervention_variables[0]][target]]
-                            for target in self.param_samples[self.intervention_variables[0]]])
-        df_SA = pd.DataFrame(columns=param_names+["Effect"])
+        param_names = self.flatten([[source + "->" + target for source in self.param_samples[self.intervention_variables[0]][target]]
+                                    for target in self.param_samples[self.intervention_variables[0]]])
+        df_SA = pd.DataFrame(columns=param_names + ["Effect"])
 
         for i_v in loop_over:
             i = self.intervention_variables.index(i_v)
             for n in range(self.N):
                 params_curr = self.flatten([[self.param_samples[i_v][target][source][n]
-                                        for source in self.param_samples[i_v][target]]
-                                        for target in self.param_samples[i_v]])
-                if outcome_var != None:  # Specifically on a variable of interest
-                    eff_size = abs(self.df_sol_per_sample[n][i].loc[self.df_sol_per_sample[n][i].Time==self.t_eval[-1], outcome_var])
+                                            for source in self.param_samples[i_v][target]]
+                                            for target in self.param_samples[i_v]])
+                if outcome_var is not None:
+                    eff_size = abs(self.df_sol_per_sample[n][i].loc[self.df_sol_per_sample[n][i].Time == self.t_eval[-1], outcome_var])
                     new_row = np.array(params_curr + [float(eff_size.iloc[0])])
-                else:  
-                    eff_size = self.df_sol_per_sample[n][i].loc[self.df_sol_per_sample[n][i].Time==self.t_eval[-1], :].abs().mean().mean()
+                else:
+                    eff_size = self.df_sol_per_sample[n][i].loc[self.df_sol_per_sample[n][i].Time == self.t_eval[-1], :].abs().mean().mean()
                     new_row = np.array(params_curr + [float(eff_size)])
-    
+
                 df_SA_new = pd.DataFrame(new_row, index=param_names + ["Effect"]).T
                 df_SA = pd.concat([df_SA, df_SA_new], ignore_index=True)
 
-        ## Top ranked model parameters across the interventions
-        # corr = df_SA.corr('spearman')
-        # #p_values = corr.apply(lambda x: x.apply(lambda y: scipy.stats.spearmanr(df_SA[x.index], df_SA[y.index])[1]))
-        # SA_results = round(corr.abs()['Effect'][[p for p in param_names if "Intercept" not in p]].sort_values(ascending=False), 2)
-        # #SA_results = pd.DataFrame(SA_results).rename(columns={'rho'})
-        # #SA_results['p-value'] = p_values['Effect'][SA_results.index]
+        # Compute correlation, p-value, and bootstrapped confidence interval
+        results = []
+        for col in df_SA.columns:
+            if col == "Effect" or col.split("->")[0] == "Intercept":
+                continue
 
-        # #print(tabulate(SA_results.loc[SA_results['rho'] > cut_off_SA_importance, :], headers='keys', tablefmt='grid'))  # Print the sensitivity analysis results
+            # Spearman correlation and p-value
+            rho, pval = scipy.stats.spearmanr(df_SA[col], df_SA["Effect"])
 
-        p_values = {col : [abs(scipy.stats.spearmanr(df_SA[col],
-                                  df_SA["Effect"])[0]),
-                    scipy.stats.spearmanr(df_SA[col],
-                                  df_SA["Effect"])[1]] for col in df_SA.columns 
-                                  if (col != "Effect") and (col.split("->")[0] != "Intercept")}
+            # Bootstrap the Spearman correlation
+            bootstrapped_corrs = []
+            for _ in range(n_bootstraps):
+                sample = df_SA.sample(n=len(df_SA), replace=True)
+                r, _ = scipy.stats.spearmanr(sample[col], sample["Effect"])
+                bootstrapped_corrs.append(r)
 
-        # Sort the dictionary by the first value of the list in the values
-        sorted_p_values = {k: v for k, v in sorted(p_values.items(), key=lambda item: item[1][0], reverse=True)}
+            lower = np.percentile(bootstrapped_corrs, 2.5)
+            upper = np.percentile(bootstrapped_corrs, 97.5)
 
-        # Filter the dictionary to show only values > cut_off_SA_importance
-        filtered_p_values = {k: v for k, v in sorted_p_values.items() if v[0] > cut_off_SA_importance}
+            if abs(rho) > cut_off_SA_importance:
+                results.append([col, round(rho, 2), round(pval, 3), f"[{round(lower, 2)}, {round(upper, 2)}]"])
 
-        # Create a table with tabulate and round values to two decimals
-        table = [[k, round(v[0], 2), round(v[1], 3)] for k, v in filtered_p_values.items()]
-        headers = ["Variable", "Spearman correlation", "p-value"]
+        # Sort by absolute correlation
+        results.sort(key=lambda x: abs(x[1]), reverse=True)
 
-        print(tabulate(table, headers, tablefmt="pretty"))
-    
+        headers = ["Variable", "Spearman correlation", "p-value", "95% CI (bootstrap)"]
+        print(tabulate(results, headers=headers, tablefmt="pretty"))
+
+        # Also return the raw correlation dictionary and df for downstream use
+        sorted_p_values = {row[0]: [row[1], row[2]] for row in results}
         return sorted_p_values, df_SA
 
     def run_simulations(self, progress_callback=None):
@@ -271,18 +285,28 @@ class SDM:
             The possible parameters are given by the adjacency and interactions matrices.
         """
         params = {var : {} for var in self.stocks_and_auxiliaries}
-        num_pars = int((self.df_adj != 0).sum().sum())
-        num_pars_int = int(np.abs(self.interactions_matrix).sum().sum())
-        if self.prior == "uniform":
-            sample_pars = np.random.uniform(0, self.parameter_value, size=(num_pars))
-            sample_pars_int = np.random.uniform(#-self.max_parameter_value/2,
-                                           0, self.parameter_value/2, size=(num_pars_int))
-        elif self.prior == "halfnormal":
-            sample_pars = halfnorm.rvs(loc = 0, scale = self.parameter_value, size=(num_pars))
-            sample_pars_int = halfnorm.rvs(loc = 0, scale = self.parameter_value/2, size=(num_pars_int))
 
-        par_int_count = 0
-        par_count = 0
+        if self.prior == "uniform":
+            sample_pars_stocks = np.random.uniform(0, self.parameter_value_stocks, size=(self.num_pars_stocks))
+            sample_pars_auxiliaries = np.random.uniform(0, self.parameter_value_aux, size=(self.num_pars_auxiliaries))
+            sample_pars_int_stocks = np.random.uniform(0, self.parameter_value_stocks/2, size=(self.num_pars_int_stocks))
+            sample_pars_int_auxiliaries = np.random.uniform(0, self.parameter_value_aux/2, size=(self.num_pars_int_auxiliaries))
+        # elif self.prior == "halfnormal":
+        #     sample_pars = halfnorm.rvs(loc = 0, scale = self.parameter_value, size=(num_pars))
+        #     sample_pars_int = halfnorm.rvs(loc = 0, scale = self.parameter_value/2, size=(num_pars_int))
+
+        # # Draw samples from the prior distribution
+        # if self.prior == "uniform":
+        #     sample_pars_aux = np.random.uniform(0, self.parameter_value_aux, size=(par_count_aux, self.N))
+        #     sample_pars_stocks = np.random.uniform(0, self.parameter_value_stocks, size=(par_count_stocks, self.N))
+        # elif self.prior == "halfnormal":
+        #     sample_pars_aux = halfnorm.rvs(loc = 0, scale = self.parameter_value_aux, size=(par_count_aux, self.N))
+        #     sample_pars_stocks = halfnorm.rvs(loc = 0, scale = self.parameter_value_stocks, size=(par_count_stocks, self.N))
+
+        par_count_auxiliaries = 0
+        par_count_stocks = 0
+        par_int_count_stocks = 0
+        par_int_count_auxiliaries = 0
     
         for i, var in enumerate(self.variables):
             # Intercept
@@ -294,21 +318,39 @@ class SDM:
                 #if self.df_adj.loc[var_2, var] != 0:
                 if self.df_adj.loc[var, var_2] != 0:
                     if self.df_adj.loc[var, var_2] == -999:
-                        params[var][var_2] = (sample_pars[par_count] * 2) - self.parameter_value  # Uniform[-self.max_parameter_value, self.max_parameter_value]
-                    else:
-                        params[var][var_2] = self.df_adj.loc[var, var_2] * sample_pars[par_count]
-                    par_count += 1
+                        if var in self.stocks:  # If the variable is a stock
+                            params[var][var_2] = (sample_pars_stocks[par_count_stocks] * 2) - self.parameter_value_stocks  # Uniform[-self.max_parameter_value, self.max_parameter_value]
+                            par_count_stocks += 1
+                        else:  # If the variable is an auxiliary
+                            params[var][var_2] = (sample_pars_auxiliaries[par_count_auxiliaries] * 2) - self.parameter_value_aux  # Uniform[-self.max_parameter_value_aux, self.max_parameter_value_aux]
+                            par_count_auxiliaries += 1
+                    else:   
+                        if var in self.stocks:  # If the variable is a stock
+                            params[var][var_2] = self.df_adj.loc[var, var_2] * sample_pars_stocks[par_count_stocks]
+                            par_count_stocks += 1
+                        else:  # If the variable is an auxiliary
+                            params[var][var_2] = self.df_adj.loc[var, var_2] * sample_pars_auxiliaries[par_count_auxiliaries]
+                            par_count_auxiliaries += 1
 
                 # 2nd-order interaction terms
                 if self.interaction_terms:
                     for k, var_3 in enumerate(self.variables):
                         if self.interactions_matrix[i, j, k] != 0:
                             if self.df_adj.loc[var, var_2] == -999:
-                                params[var][var_2 + " * " + var_3] = (sample_pars[par_count] * 2) - self.parameter_value  # Uniform[-self.max_parameter_value, self.max_parameter_value]
-                            else:
-                                params[var][var_2 + " * " + var_3] = self.interactions_matrix[i, j, k] * sample_pars_int[par_int_count]
-
-                            par_int_count += 1
+                                if var in self.stocks:  # If the variable is a stock
+                                    params[var][var_2 + " * " + var_3] = (sample_pars_int_stocks[par_int_count_stocks] * 2) - self.parameter_value_stocks  # Uniform[-self.max_parameter_value, self.max_parameter_value]
+                                    par_int_count_stocks += 1
+                                elif var in self.auxiliaries:  # If the variable is an auxiliary
+                                    params[var][var_2 + " * " + var_3] = (sample_pars_int_auxiliaries[par_int_count_auxiliaries] * 2) - self.parameter_value_aux
+                                    par_int_count_auxiliaries += 1
+                            else:   
+                                if var in self.stocks: # If the variable is a stock
+                                    params[var][var_2 + " * " + var_3] = self.interactions_matrix[i, j, k] * sample_pars_int_stocks[par_int_count_stocks]
+                                    par_int_count_stocks += 1
+                                if var in self.auxiliaries: # If the variable is an auxiliary
+                                    params[var][var_2 + " * " + var_3] = self.interactions_matrix[i, j, k] * sample_pars_int_auxiliaries[par_int_count_auxiliaries]
+                                    par_int_count_auxiliaries += 1
+        
 
                         #   params[var][var_2 + " * " + var_3] = (params[var][var_2 + " * " + var_3] * 2) - self.parameter_value/2  # [-self.max_parameter_value/2, self.max_parameter_value/2]
    
@@ -426,9 +468,9 @@ class SDM:
                                    method=self.solver, rtol=1e-6, atol=1e-6).y
 
         if np.sum(solution > 10):
-            print("Warning: Solution has values larger than 10. The maximum parameter value (max_parameter_value) may be too large.")
+            print("Warning: Solution has values larger than 10. The maximum parameter values may be too large.")
         #if np.sum(solution > 1) > 0 == False:
-        #    print("Warning: Solution does not have values larger than 1. The maximum parameter value (max_parameter_value) may be too small.")
+        #    print("Warning: Solution does not have values larger than 1. The maximum parameter values may be too small.")
         df_sol = pd.DataFrame(solution.T, columns=self.stocks_and_constants, index=self.t_eval)
         df_sol["Time"] = df_sol.index
 
@@ -508,159 +550,10 @@ class SDM:
         """
         return A
 
-    def get_link_scores(self, df_i, params):
-        """ Get the link scores for the Loops That Matter method.
-        """
-        linkscores = {t : {} for t in self.t_eval[1:]}
-
-        for i in range(len(self.t_eval)-1):  # For all time steps
-            current_t = self.t_eval[i + 1]
-            previous_t = self.t_eval[i]
-            t = current_t
-           # linkscores[current_t] = {k : {g : -999 for g in params[k] if g != "Intercept"} for k in params}
-            temp = {k : {g : -999 for g in params[k] if (g != "Intercept") and ("*" not in g)} for k in params}
-
-            # If interaction term, create separate links for the individual terms
-            for output in params:
-                for input in params[output]:
-                    if "*" in input:
-                        input1, input2 = input.split(" * ")
-                        temp[output][input1] = -999
-                        temp[output][input2] = -999
-            linkscores[current_t] = temp
-
-            for target in self.stocks_and_auxiliaries:  # For all stocks and auxiliaries
-                target_value = df_i.loc[current_t, target]
-                target_previous_value = df_i.loc[previous_t, target]
-                delta_target = target_value - target_previous_value 
-
-                if target in self.stocks:
-                    sum_of_flows = 0
-                    sum_of_delta_flows = 0
-                    sum_of_previous_flows = 0
-
-                    for run in range(2):
-                        for source in linkscores[t][target]:
-                            # Calculate the flow based on main effects
-                            source_previous_value = df_i.loc[previous_t, source]
-                            source_current_value = df_i.loc[current_t, source]
-
-                            if source in params[target]:  # Main effect term is included
-                                flow_previous_value = source_previous_value * params[target][source]
-                                flow_current_value = source_current_value * params[target][source]
-                            else:
-                                flow_previous_value = 0
-                                flow_current_value = 0
-
-                            # Calculate the flow with interaction terms added
-                            terms = list(params[target].keys())  # Get all the right-hand side terms, including interaction terms
-                            for term in [x for x in terms if "*" in x]:  # Loop over interaction terms
-                                if source in term:  # The source is part of an interaction term
-                                    source_1_previous_value = df_i.loc[previous_t, term.split(" * ")[0]]
-                                    source_2_previous_value = df_i.loc[previous_t, term.split(" * ")[1]]
-                                    source_1_current_value = df_i.loc[current_t, term.split(" * ")[0]]
-                                    source_2_current_value = df_i.loc[current_t, term.split(" * ")[1]]
-                                    
-                                    # Add the interaction terms to the flows
-                                    flow_previous_value += source_1_previous_value * source_2_previous_value * params[target][term]
-                                    flow_current_value += source_1_current_value * source_2_current_value * source_current_value * params[target][term]
-
-                                    #input1, input2 = term.split(" * ")
-                                    #temp[out][source] = params[out][term] * input1 * input2
-                                    #if input in terms:  # The input variable also contains a main effect
-                                    #    temp[out][input] += params[out][input] * input
-
-                        #    # if "*" in source:  # Interaction term
-                        #         source_1_previous_value = df_i.loc[previous_t, source.split(" * ")[0]]
-                        #         source_2_previous_value = df_i.loc[previous_t, source.split(" * ")[1]]
-                        #         source_1_current_value = df_i.loc[current_t, source.split(" * ")[0]]
-                        #         source_2_current_value = df_i.loc[current_t, source.split(" * ")[1]]
-                        #         flow_previous_value = source_1_previous_value * source_2_previous_value * params[target][source]
-                        #         flow_current_value = source_1_current_value * source_2_current_value * source_current_value * params[target][source]
-                        #     else:  # Regular term
-                        #         source_previous_value = df_i.loc[previous_t, source]
-                        #         source_current_value = df_i.loc[current_t, source]
-                        #         flow_previous_value = source_previous_value * params[target][source]
-                        #         flow_current_value = source_current_value * params[target][source]
-
-                            delta_source = source_current_value - source_previous_value
-                            delta_flow = flow_current_value - flow_previous_value
-
-                            if run == 0:
-                                sum_of_delta_flows += delta_flow
-                                sum_of_flows += flow_current_value
-                                sum_of_previous_flows += flow_previous_value
-                            else:  # Second run
-                                if sum_of_flows == 0 or sum_of_delta_flows == 0:
-                                    linkscores[t][target][source] = 0
-                                else:
-                                    sign = np.sign(flow_current_value) #params[target][source])  # Determine whether inflow or outflow
-                                    linkscores[t][target][source] = np.abs(delta_flow / sum_of_delta_flows) * sign
-                
-                elif target_value == target_previous_value:  # No change, thus remains constant
-                    for source in linkscores[t][target]:
-                        linkscores[t][target][source] = 0
-                
-                else:  # Auxiliary
-                    for source in linkscores[t][target]:
-                        if "*" in source:  # Interaction term
-                            source_1_previous_value = df_i.loc[previous_t, source.split(" * ")[0]]
-                            source_2_previous_value = df_i.loc[previous_t, source.split(" * ")[1]]
-                            source_1_current_value = df_i.loc[current_t, source.split(" * ")[0]]
-                            source_2_current_value = df_i.loc[current_t, source.split(" * ")[1]]
-                            delta_source_1 = source_1_current_value - source_1_previous_value
-                            delta_source_2 = source_2_current_value - source_2_previous_value
-                            delta_target_respect_to_source = delta_source_1 * delta_source_2 * params[target][source]
-                            sign = np.sign(delta_target_respect_to_source/(delta_source_1 * delta_source_2))
-                        else:
-                            source_value = df_i.loc[current_t, source]
-                            source_previous_value = df_i.loc[previous_t, source]
-                            delta_source = source_value - source_previous_value
-                            delta_target_respect_to_source = delta_source * params[target][source]
-                        if delta_target == 0 or delta_source == 0:
-                            linkscores[t][target][source] = 0
-                        else:
-                            sign = np.sign(delta_target_respect_to_source/delta_source)
-                            linkscores[t][target][source] = np.abs(delta_target_respect_to_source / delta_target) * sign
-        return linkscores
-
-    def get_loop_scores(self, linkscores):
-        """ For each loop, estimate the total loop score which is the multiplication of all the linkscores in the loop 
-        """
-        # Create a DiGraph from the adjacency matrix
-        G = nx.DiGraph(self.df_adj_incl_interactions)
-        feedback_loops = list(nx.simple_cycles(G))
-        t_eval_loops = self.t_eval[1:]
-
-        # print("The feedback loops are: ", feedback_loops)
-
-        loopscores = {}
-        for loop in feedback_loops:
-            loop_name = ", ".join(loop)
-            loopscores[loop_name] = []
-            close_loop = loop + [loop[0]]  # Add first element at the end again to close the loop
-
-            for t in t_eval_loops:
-                link_scores_per_loop = []
-                for i in range(len(close_loop)-1):
-                    assert self.df_adj_incl_interactions.loc[close_loop[i], close_loop[i+1]] != 0  # There must be a link between the two nodes
-                    #assert self.df_adj.loc[close_loop[i], close_loop[i+1]] != 0  # There must be a link between the two nodes
-                    link_scores_per_loop += [linkscores[t][close_loop[i]][close_loop[i+1]]]
-                
-                loop_score = np.prod(link_scores_per_loop)
-                loopscores[loop_name] += [loop_score]  # Loop score per time
-
-        ### Normalize the loop scores by taking the loop score divided by the sum of all loop scores
-        normalizing_constants = [np.sum([np.abs(loopscores[ls][i]) for ls in loopscores]) for i in range(len(t_eval_loops))]
-        for i in range(len(t_eval_loops)):
-            for ls in loopscores:
-                loopscores[ls][i] = loopscores[ls][i] / normalizing_constants[i]
-        return loopscores, feedback_loops
-
-
-    def compare_interventions_table(self, intervention_effects):
+    def compare_interventions_table(self, intervention_effects, n_bootstraps=200):
         """Compares interventions using the percentage of samples 
-        where one intervention is greater than the other and Cliff's Delta.
+        where one intervention is greater than the other, Cliff's Delta,
+        and adds 95% bootstrapped confidence intervals for % Greater.
         """
         temp = []
         comparison_results = []
@@ -677,15 +570,30 @@ class SDM:
                     cliff = (greater_i - greater_j) / len(differences)
                     percent_greater = round(greater_i * 100 / len(differences), 1)
 
-                    # Store results for combined table
-                    comparison_results.append([i, j, percent_greater, round(cliff, 2)])
+                    # Bootstrap % Greater
+                    bootstrapped_percents = []
+                    for _ in range(n_bootstraps):
+                        idx = np.random.choice(len(differences), size=len(differences), replace=True)
+                        diff_sample = differences[idx]
+                        greater_i_sample = np.sum(diff_sample > 0)
+                        bootstrapped_percents.append(greater_i_sample * 100 / len(diff_sample))
+                    lower = round(np.percentile(bootstrapped_percents, 2.5), 1)
+                    upper = round(np.percentile(bootstrapped_percents, 97.5), 1)
+                    ci_str = f"[{lower}, {upper}]"
+
+                    # Store results
+                    comparison_results.append([i, j, percent_greater, ci_str, round(cliff, 2)])
 
             temp.append(i)
 
-        # Print single table with both metrics
-        print("\nComparison Table (Percentage Greater & Cliff’s Delta):")
-        print(tabulate(comparison_results, headers=["Intervention A", "Intervention B", "% Greater", "Cliff's Delta"], tablefmt="grid"))
-
+        # Print combined table
+        print("\nComparison Table (Percentage Greater, 95% CI, Cliff’s Delta):")
+        print(tabulate(
+            comparison_results,
+            headers=["Intervention A", "Intervention B", "% Greater", "95% CI (% Greater)", "Cliff's Delta"],
+            tablefmt="grid"
+        ))
+        
 ### TESTING ###
     def f_no_aux(self, time, x, params_wo_auxiliaries):
         """ Test the vectorized equation x' = Ax + Kxx.

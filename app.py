@@ -19,8 +19,10 @@ if "time_unit" not in st.session_state:
     st.session_state.time_unit = "Months"
 if "t_end" not in st.session_state:
     st.session_state.t_end = "12"
-if "parameter_value" not in st.session_state:
-    st.session_state.parameter_value = "0.5"
+if "parameter_value_aux" not in st.session_state:
+    st.session_state.parameter_value_aux = "0.5"
+if "parameter_value_stocks" not in st.session_state:
+    st.session_state.parameter_value_stocks = "0.1" 
 if "seed" not in st.session_state:
     st.session_state.seed = "1912884"
 if "cut_off_SA_importance" not in st.session_state:
@@ -28,11 +30,12 @@ if "cut_off_SA_importance" not in st.session_state:
 
 # User inputs linked to session state
 N = st.text_input("Enter the number of simulations to run (default 100)", st.session_state.N)
-time_unit = st.text_input("Enter the base unit of time (default: Months)", st.session_state.time_unit)
-t_end = st.text_input("Enter the final simulation time point (default: 12)", st.session_state.t_end)
-parameter_value = st.text_input("Enter the max parameter value theta (default 0.5)", st.session_state.parameter_value)
+time_unit = st.text_input("Enter the base unit of time", st.session_state.time_unit)
+t_end = st.text_input("Enter the final simulation time point", st.session_state.t_end)
+parameter_value_aux = st.text_input("Enter the max parameter value for auxiliaries", st.session_state.parameter_value_aux)
+parameter_value_stocks = st.text_input("Enter the max parameter value for stocks", st.session_state.parameter_value_stocks)
 seed = st.text_input("Enter a seed for reproducibility (leave blank for random)", st.session_state.seed)
-cut_off_SA_importance = st.text_input("Enter a cut-off for sensitivity coefficients to print (default rho>0.1)", st.session_state.cut_off_SA_importance)
+cut_off_SA_importance = st.text_input("Enter a cut-off for sensitivity coefficients to print (default rho>=0.1)", st.session_state.cut_off_SA_importance)
 
 # Update session state when user changes input
 if N != st.session_state.N:
@@ -41,8 +44,10 @@ if time_unit != st.session_state.time_unit:
     st.session_state.time_unit = time_unit
 if t_end != st.session_state.t_end:
     st.session_state.t_end = t_end
-if parameter_value != st.session_state.parameter_value:
-    st.session_state.parameter_value = parameter_value
+if parameter_value_aux != st.session_state.parameter_value_aux:
+    st.session_state.parameter_value_aux = parameter_value_aux
+if parameter_value_stocks != st.session_state.parameter_value_stocks:
+    st.session_state.parameter_value_stocks = parameter_value_stocks
 if seed != st.session_state.seed:
     st.session_state.seed = seed
 if cut_off_SA_importance != st.session_state.cut_off_SA_importance:
@@ -64,7 +69,8 @@ if st.button("Run Simulation") and uploaded_kumu_excel is not None:
         s.N = int(N)
         s.t_end = int(t_end)
         s.time_unit = time_unit
-        s.parameter_value = float(parameter_value)
+        s.parameter_value_aux = float(parameter_value_aux)
+        s.parameter_value_stocks = float(parameter_value_stocks)
         s.prior = "uniform"
         s.seed = int(seed) if seed.strip() else None
 
@@ -97,9 +103,7 @@ if st.button("Run Simulation") and uploaded_kumu_excel is not None:
         # Capture print output
         output_buffer = io.StringIO()
         sys.stdout = output_buffer  # Redirect print statements to buffer
-
         SA_results, df_SA = sdm.run_SA(voi, int_var, float(cut_off_SA_importance))
-
         sys.stdout = sys.__stdout__  # Reset stdout to normal
     
         # Display captured output in Streamlit
