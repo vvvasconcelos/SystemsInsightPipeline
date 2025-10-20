@@ -10,93 +10,72 @@ from types import SimpleNamespace
 from openpyxl import load_workbook
 
 class Extract:
-    def __init__(self, file_path): #, settings_path): #file_path, settings_path):
+    def __init__(self, file_path):
         self.file_path = file_path
-        #self.settings_path = settings_path
         self.variables = []
         self.var_to_type = {}
         self.adjacency_matrix = None
         self.interactions_matrix = None
 
-        # self.get_settings() # Get settings from the json file
-        #self.test_extraction()  # Call the test_extraction function when the class is loaded
-
-    # def get_settings(self):
-    #     """ Get the settings from the json file
-    #     """
-    #     with open(self.settings_path) as f:
-    #         settings = json.load(f)
-    #     s = SimpleNamespace(**settings)
-
-        # s.setting_name = self.setting_name
-        # curr_time = (str(datetime.datetime.now())[0:10])  # Create a new folder for each date
-
-        # if s.save_results:  # Create a directory to store results
-        #     folder_path = os.path.join(self.current_path,"Results", f"{curr_time}_{self.setting_name}")
-
-        #     if not os.path.exists(folder_path):
-        #         os.mkdir(folder_path)
-
-        #     with open(os.path.join(folder_path, f"used_settings_{self.setting_name}.json"), 'w+') as f:
-        #         json.dump(settings, f, indent=2)  # Store current settings
-
-        #     s.save_path = os.path.join("Results", curr_time + '_' + self.setting_name + "/")  # Path for saving the results
-        #self.s = s
-
-    def extract_settings(self):
+    def extract_settings(self, double_factor_interventions_setting=None):
         """ Extract all settings based on the json and Kumu files
         """
-        #s = self.s
-        s = SimpleNamespace(**{"interaction_terms" : 0,
-                               "solve_analytically" : 0})
-
         # Load the adjacency matrix from the KUMU file
-        variable_names, var_to_type_init, df_adj, interactions_matrix, intervention_variables, variable_of_interest, centrality = self.adjacency_matrix_from_kumu()  
-
-        if s.interaction_terms:
-            if np.abs(interactions_matrix).sum() > 0:
-                print("Solving an SDM with interaction terms.")
-                if s.solve_analytically and s.interaction_terms:
-                    print("Cannot solve analytically with interaction terms so will proceed with numerical solution.")
-            else:
-                print("No interaction terms specified so will solve linear SDM.")
-                s.interaction_terms = False
+        #variable_names, var_to_type_init, df_adj, interactions_matrix, intervention_variables, variable_of_interest, centrality = self.adjacency_matrix_from_kumu()  
+        self.adjacency_matrix_from_kumu()  
     
-        # Load variable names and automatically fill any spaces with underscores
-        s.stocks = [var.replace(" ", "_") for var in variable_names if var_to_type_init[var].lower() == 'stock']
-        s.auxiliaries = [var.replace(" ", "_") for var in variable_names if var_to_type_init[var].lower() == 'auxiliary']
-        s.constants = [var.replace(" ", "_") for var in variable_names if var_to_type_init[var].lower() == 'constant']
-        s.variables = [var.replace(" ", "_") for var in variable_names]  # s.auxiliaries + s.stocks + s.constants
-        s.stocks_and_constants = [var.replace(" ", "_") for var in variable_names if var_to_type_init[var] in ['stock', 'constant']]
-        s.stocks_and_auxiliaries = [var.replace(" ", "_") for var in variable_names if var_to_type_init[var] in ['stock', 'auxiliary']]
-        s.var_to_type = {var.replace(" ", "_") : var_to_type_init[var] for var in variable_names}
-        #s.variable_of_interest = "_".join(s.variable_of_interest.split(" "))  # Ensure the variable of interest is formulated with underscores
-        s.simulate_interventions = True  # Always simulate interventions
-        s.variable_of_interest = []
-        for voi in variable_of_interest:
-            voi = voi.replace(" ", "_")
-            s.variable_of_interest += [voi]
-        # s.variable_of_interest = variable_of_interest.replace(" ", "_")  # Ensure the variable of interest is formulated with underscores
-        s.intervention_variables = intervention_variables   #[var for var in s.variables if var != s.variable_of_interest]  
-        s.intervention_variables = [var.replace(" ", "_") for var in s.intervention_variables]  # Ensure the variable of interest is formulated with underscores
-        s.centrality = centrality
-        s.intervention_effects = {x.replace(" ", "_") : self.intervention_effects[x] for x in self.intervention_effects}
+        #return self.variables, self.var_to_type, self.df_adj, self.interactions_matrix, self.intervention_variables, self.variable_of_interest, self.centrality
+        #if s.interaction_terms:
+        if np.abs(self.interactions_matrix).sum() > 0:  # Interaction terms specified
+            print("Solving an SDM with interaction terms.")
+            print("Two-factor interventions will be simulated by default, unless specified otherwise using s.double_factor_interventions = False")
+            s = SimpleNamespace(**{"interaction_terms" : 1,
+                                   "solve_analytically" : 0,
+                                   "double_factor_interventions" : 1})  # Default to double factor interventions
+        else:
+            print("No interaction terms specified so will solve linear SDM.")
+            s = SimpleNamespace(**{"interaction_terms" : 0,
+                                   "solve_analytically" : 1,
+                                   "double_factor_interventions" : 0})
+            #s.interaction_terms = False
 
-        # Set the SDM simulation timesteps to store 
-        #s.t_eval = np.array(np.array([0.0] + list(np.linspace(0, s.t_end,
-        #                                                    int(s.t_end/s.dt) + 1)[1:])))
+        if double_factor_interventions_setting is not None: # If specified, override the default setting
+            s.double_factor_interventions = double_factor_interventions_setting
 
-        # If solving the system numerically, set the solver
-        #s.solver = 'LSODA'  # 'LSODA' automatically switches between stiff and non-stiff methods since stiffness is not always known.
-
-        # For D2D only single factor interventions
-        s.double_factor_interventions = False  # Default to single factor interventions
-
-        # If double factor interventions selected, add double factor interventions 
         if s.double_factor_interventions and s.interaction_terms == False:
-            warnings.warn("Without interaction terms, double factor interventions are not meaningful. Consider setting double_factor_interventions to False.")
-            # s.double_factor_interventions = 0
+            warnings.warn("Without interaction terms, double factor interventions are not meaningful." \
+                          "Consider setting double_factor_interventions to False.")
 
+        # Load variable names and fill any spaces with underscores
+        # s.stocks = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var].lower() == 'stock']
+        # s.auxiliaries = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var].lower() == 'auxiliary']
+        # s.constants = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var].lower() == 'constant']
+        # s.variables = [var.replace(" ", "_") for var in self.variables]  # s.auxiliaries + s.stocks + s.constants
+        # s.stocks_and_constants = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var] in ['stock', 'constant']]
+        # s.stocks_and_auxiliaries = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var] in ['stock', 'auxiliary']]
+        # s.var_to_type = {var.replace(" ", "_") : self.var_to_type[var] for var in self.variables}
+
+        s.stocks = [var for var in self.variables if self.var_to_type[var].lower() == 'stock']
+        s.auxiliaries = [var for var in self.variables if self.var_to_type[var].lower() == 'auxiliary']
+        s.constants = [var for var in self.variables if self.var_to_type[var].lower() == 'constant']
+        s.variables = [var for var in self.variables]  # s.auxiliaries + s.stocks + s.constants
+        s.stocks_and_constants = [var for var in self.variables if self.var_to_type[var] in ['stock', 'constant']]
+        s.stocks_and_auxiliaries = [var for var in self.variables if self.var_to_type[var] in ['stock', 'auxiliary']]
+        s.var_to_type = {var : self.var_to_type[var] for var in self.variables}
+
+        s.variable_of_interest = []
+        for voi in self.variable_of_interest:
+            #voi = voi.replace(" ", "_")
+            s.variable_of_interest += [voi]
+
+        s.centrality = self.centrality
+        s.intervention_variables = self.intervention_variables #[var.replace(" ", "_") for var in self.intervention_variables]
+        s.intervention_strengths = self.intervention_strengths #{x.replace(" ", "_") : self.intervention_strengths[x] for x in self.intervention_strengths}
+
+        if len(s.intervention_variables) == 0:
+            raise(Exception("There should be at least one intervention variable specified in the Excel file."))
+        
+        # If double factor interventions selected, add double factor interventions 
         if s.double_factor_interventions:
             double_intervention_variables = []
             for i, var in enumerate(s.intervention_variables):
@@ -106,11 +85,11 @@ class Extract:
             
             s.intervention_variables += double_intervention_variables
 
-        df_adj.rename(index=dict(zip(self.variables, s.variables)),
-                        columns=dict(zip(self.variables, s.variables)), inplace=True)
+        self.df_adj.rename(index=dict(zip(self.variables, s.variables)),
+                           columns=dict(zip(self.variables, s.variables)), inplace=True)
 
-        s.df_adj = df_adj  # Save the adjacency matrix to the settings
-        s.interactions_matrix = interactions_matrix # Save the interactions matrix to the settings
+        s.df_adj = self.df_adj  # Save the adjacency matrix to the settings
+        s.interactions_matrix = self.interactions_matrix # Save the interactions matrix to the settings
 
         # Add the interactions to the adjacency matrix for the identification of feedback loops with interaction terms
         s.df_adj_incl_interactions = s.df_adj.copy()
@@ -131,9 +110,13 @@ class Extract:
     def check_loops(self, df_e, df_c):
         """ Check whether all loops have stocks and the ratio of balancing loops in the CLD
         """
-        stocks = list(df_e.loc[df_e.Type == "stock", "Label"])
-        num_stocks_and_auxiliaries = df_e.loc[(df_e.Type == "stock") | (df_e.Type == "auxiliary")].shape[0]
+        #stocks = list(df_e.loc[df_e.Type == "stock", "Label"])
+        #num_stocks_and_auxiliaries = df_e.loc[(df_e.Type == "stock") | (df_e.Type == "auxiliary")].shape[0]
+        stocks = [var for var in self.variables if self.var_to_type[var].lower() == "stock"]
 
+        num_stocks_and_auxiliaries = len([var for var in self.variables 
+                                        if self.var_to_type[var].lower() in ["stock", "auxiliary"]])
+    
         # ## Check for balancing loops
         max_loops_check = 5  # Maximum number of loops to check to not take too much time
         if num_stocks_and_auxiliaries < max_loops_check:
@@ -231,13 +214,35 @@ class Extract:
         df_c = df_c[["From", "Type", "To"]]
         
         # Extract variables from the Elements 
-        self.variables = list(df_e["Label"])
-        self.variables = [var.replace("-", "") for var in self.variables]  # Ensure the variable names are formatted without dashes
-        self.variables = [var.replace("/", "") for var in self.variables]  # Ensure the variable names are formatted without slashes
-        self.var_to_type = dict(zip(self.variables, list(df_e["Type"])))
-        self.intervention_variables = list(df_e.loc[(df_e["Tags"] == -1)*1 +
-                                                    (df_e["Tags"] == 1)*1 > 0, "Label"])
-        self.intervention_effects = dict(zip(self.variables, list(df_e.loc[:, "Tags"])))
+        self.original_variables = list(df_e["Label"])
+
+        for var in self.original_variables:
+            if "+" in var:
+                raise(Exception(f'Variable name {var} contains a disallowed special character (+). Please remove these characters from the variable names.'))
+            if "*" in var:
+                raise(Exception(f'Variable name {var} contains a disallowed special character (*). Please remove these characters from the variable names.'))
+
+        # Remove special characters from variable names and leave no extra spaces
+        #self.variables =  [" ".join(var.replace("-", " ").replace("/", " ").replace("'", "").replace("(", "").replace(")", "").split()) for var in self.original_variables]
+        #self.variables = [re.sub(r'[^a-zA-Z0-9_\s]', '', var).strip() for var in self.original_variables]
+        #self.variables = [" ".join(var.split()) for var in self.variables]
+        self.variables = [" ".join(var.split()) for var in self.original_variables] # Just remove extra spaces
+        self.var_to_type = dict(zip(self.variables, list(df_e["Type"])))  # Create dictionary with relevant labels
+        self.original_to_cleaned_var = dict(zip(self.original_variables, self.variables))
+
+        ### Assign stock or constant to variables without type
+        for var in self.original_variables:
+            if str(self.var_to_type[self.original_to_cleaned_var[var]]).lower() not in ['stock', 'auxiliary', 'constant']:
+                if var in list(df_c['To']): # If it has ingoing links and is therefore endogenous, assign as stock
+                    print(f'Warning: Variable {self.original_to_cleaned_var[var]} has no (known) label assigned, namely {self.var_to_type[self.original_to_cleaned_var[var]]}, defaulting to stock as it has ingoing links.')
+                    self.var_to_type[self.original_to_cleaned_var[var]] = 'stock'
+                else:  # If exogenous, assign as constant
+                    print(f'Warning: Variable {self.original_to_cleaned_var[var]} has no (known) label assigned, namely {self.var_to_type[self.original_to_cleaned_var[var]]}, defaulting to constant as it has no ingoing links.')
+                    self.var_to_type[self.original_to_cleaned_var[var]] = 'constant'
+                print("")
+
+        self.intervention_variables = [self.original_to_cleaned_var[var] for var in list(df_e.loc[df_e["Tags"] != 0, "Label"])]
+        self.intervention_strengths = dict(zip(self.variables, list(df_e.loc[:, "Tags"])))
         self.variable_of_interest = list(df_e.loc[df_e["Description"] == "VOI", "Label"])
 
         if len(self.variable_of_interest) == 1:
@@ -257,7 +262,13 @@ class Extract:
 
         # Populate the adjacency matrix
         for i, origin in enumerate(df_c["From"]):
+            if origin not in self.original_variables:
+                raise(Exception(f'Origin variable {origin} in Connections sheet not found in Elements sheet. Please check the Kumu Excel file.'))
+    
             destination = df_c["To"][i]
+
+            if destination not in self.original_variables:
+                raise(Exception(f'Destination variable {destination} in Connections sheet not found in Elements sheet. Please check the Kumu Excel file.'))
 
             # Determine the polarity
             polarity = 0
@@ -270,15 +281,16 @@ class Extract:
                 polarity = -999
 
             # Calculate indices
-            origin_index = self.variables.index(origin)
-            destination_index = self.variables.index(destination)
+            origin_index = self.original_variables.index(origin)
+            destination_index = self.original_variables.index(destination)
 
             # Add polarity to adjacency matrix
             self.adjacency_matrix[destination_index, origin_index] = polarity
 
         # Create dataframe with adjacency matrix
         self.df_adj = pd.DataFrame(self.adjacency_matrix,
-                                   columns=self.variables, index=self.variables) 
+                                   columns=self.variables,
+                                   index=self.variables) 
 
         #np.random.seed(s.seed)  # Set seed for reproducibility
 
@@ -287,13 +299,22 @@ class Extract:
 
         ### Check if any constants have incoming links
         for const in constants:
-            num_links = np.sum(np.abs(self.df_adj.loc[const, :]))
-            if num_links != 0:
-                print(f'Removed {num_links} incoming links for constant {const}')
+            num_incoming_links = np.sum(np.abs(self.df_adj.loc[const, :]))
+            if num_incoming_links != 0:
+                print(f'Removed {num_incoming_links} incoming links for constant {const}')
                 self.df_adj.loc[const, :] = 0
                 #else:
                 #    raise(Exception(f'Number of incoming links for constant {const} is {num_links}, should be zero.'))
-        
+
+        for var in self.variables:
+            if var not in constants:
+                num_incoming_links = np.sum(np.abs(self.df_adj.loc[var, :]))
+                #if num_incoming_links != 0:
+                if num_incoming_links == 0:
+                    #print(f'Removed {num_incoming_links} incoming links for variable {var}')
+                    #self.df_adj.loc[var, :] = 0
+                    raise(Exception(f'Number of incoming links for (non-constant) variable {var} is {num_incoming_links}, should be at least one.'))
+
         self.check_loops(df_e, df_c)  # Check for stocks in loops and ratio of balancing loops
 
 
@@ -329,9 +350,9 @@ class Extract:
                     polarity = -999 # Placeholder for missing values
 
                 # Calculate indices
-                origin_1_index = self.variables.index(origin_1)
-                origin_2_index = self.variables.index(origin_2)
-                destination_index = self.variables.index(destination)
+                origin_1_index = self.original_variables.index(origin_1)
+                origin_2_index = self.original_variables.index(origin_2)
+                destination_index = self.original_variables.index(destination)
 
                 # Add polarity to interactions matrix
                 self.interactions_matrix[destination_index, origin_2_index, origin_1_index] = polarity
@@ -340,7 +361,7 @@ class Extract:
         """Run the CLD analysis by extracting the adjacency matrix and interactions matrix."""
         self.extract_adjacency_matrix()
         self.extract_interactions_matrix()
-        return self.variables, self.var_to_type, self.df_adj, self.interactions_matrix, self.intervention_variables, self.variable_of_interest, self.centrality
+        #return self.variables, self.var_to_type, self.df_adj, self.interactions_matrix, self.intervention_variables, self.variable_of_interest, self.centrality
 
 
 ### TESTING ###

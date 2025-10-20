@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='systemdynamics',
-    version='0.1.4',
+    version='0.1.5',
     packages=find_packages(),
     install_requires=[
         'pandas>=1.3.0',
@@ -16,7 +16,8 @@ setup(
         'networkx >= 2.5',
         'ipywidgets',
         'numexpr>=2.8.4',
-        'bottleneck>=1.3.6'
+        'bottleneck>=1.3.6',
+        'tabulate>=0.8.9'
     ],
     entry_points={
         'console_scripts': [
