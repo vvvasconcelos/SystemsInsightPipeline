@@ -20,13 +20,15 @@ if "time_unit" not in st.session_state:
 if "t_end" not in st.session_state:
     st.session_state.t_end = "12"
 if "parameter_value_aux" not in st.session_state:
-    st.session_state.parameter_value_aux = "0.5"
+    st.session_state.parameter_value_aux = "0.3"
 if "parameter_value_stocks" not in st.session_state:
     st.session_state.parameter_value_stocks = "0.1" 
 if "seed" not in st.session_state:
     st.session_state.seed = "1912884"
 if "cut_off_SA_importance" not in st.session_state:
     st.session_state.cut_off_SA_importance = "0.1"
+if "double_factor_interventions_setting" not in st.session_state:
+    st.session_state.double_factor_interventions_setting = "0"
 
 # User inputs linked to session state
 N = st.text_input("Enter the number of simulations to run (default 100)", st.session_state.N)
@@ -36,6 +38,7 @@ parameter_value_aux = st.text_input("Enter the max parameter value for auxiliari
 parameter_value_stocks = st.text_input("Enter the max parameter value for stocks", st.session_state.parameter_value_stocks)
 seed = st.text_input("Enter a seed for reproducibility (leave blank for random)", st.session_state.seed)
 cut_off_SA_importance = st.text_input("Enter a cut-off for sensitivity coefficients to print (default rho>=0.1)", st.session_state.cut_off_SA_importance)
+double_factor_interventions_setting = st.text_input("If you have interaction terms, do you want to simulate interventions on two factors simultaneously: 0=no, 1=yes (default: 0)?", st.session_state.double_factor_interventions_setting)
 
 # Update session state when user changes input
 if N != st.session_state.N:
@@ -52,6 +55,8 @@ if seed != st.session_state.seed:
     st.session_state.seed = seed
 if cut_off_SA_importance != st.session_state.cut_off_SA_importance:
     st.session_state.cut_off_SA_importance = cut_off_SA_importance
+if double_factor_interventions_setting != st.session_state.double_factor_interventions_setting:
+    st.session_state.double_factor_interventions_setting = double_factor_interventions_setting
 
 # Button to confirm and run the simulation
 if st.button("Run Simulation") and uploaded_kumu_excel is not None:
@@ -63,7 +68,7 @@ if st.button("Run Simulation") and uploaded_kumu_excel is not None:
 
         # Process files
         extract = Extract(file_path)
-        s = extract.extract_settings()
+        s = extract.extract_settings(double_factor_interventions_setting)
 
         # Convert inputs
         s.N = int(N)
