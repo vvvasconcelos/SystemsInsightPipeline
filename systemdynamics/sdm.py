@@ -590,7 +590,7 @@ class SDM:
 
             if abs(rho) > cut_off_SA_importance:
                 results.append([col, round(rho, 2), 
-                                round(pval, 3), 
+                                #round(pval, 3), 
                                 f"[{round(lower, 2)}, {round(upper, 2)}]",
                                 round(np.mean(mean_per_int), 2),
                                 round(np.std(mean_per_int), 2)])
@@ -599,7 +599,7 @@ class SDM:
         results.sort(key=lambda x: abs(x[1]), reverse=True)
 
         #headers = ["Variable", "Global rho", "p-value", "95% CI (bootstrap)"]
-        headers = ["Variable", "Global Correlation", "95% CI (bootstrap)", "p-value", "Mean Correlation per Intervention", "SD Correlation per Intervention"]
+        headers = ["Link", "Rho", "95% CI (bootstrap)", "Mean Rho per Int", "SD Rho per Int"] #"p-value", 
         
         print(tabulate(results, headers=headers, tablefmt="pretty"))
 

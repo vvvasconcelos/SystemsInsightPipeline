@@ -66,9 +66,11 @@ if st.button("Run Simulation") and uploaded_kumu_excel is not None:
         with open(file_path, "wb") as f:
             f.write(uploaded_kumu_excel.getvalue())
 
+        double_factor_interventions_setting_ = int(double_factor_interventions_setting) # Convert to boolean
+
         # Process files
         extract = Extract(file_path)
-        s = extract.extract_settings(double_factor_interventions_setting)
+        s = extract.extract_settings(double_factor_interventions_setting_)
 
         # Convert inputs
         s.N = int(N)
@@ -86,7 +88,7 @@ if st.button("Run Simulation") and uploaded_kumu_excel is not None:
         # Run simulations
         st.subheader("Simulated Intervention Rankings")
 
-        df_sol, param_samples, eig_val_vec = sdm.run_simulations()
+        df_sol, param_samples = sdm.run_simulations()
 
         intervention_effects_per_voi = sdm.get_intervention_effects()
 

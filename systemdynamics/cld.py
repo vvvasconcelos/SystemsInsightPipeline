@@ -28,10 +28,10 @@ class Extract:
         #if s.interaction_terms:
         if np.abs(self.interactions_matrix).sum() > 0:  # Interaction terms specified
             print("Solving an SDM with interaction terms.")
-            print("Two-factor interventions will be simulated by default, unless specified otherwise using s.double_factor_interventions = False")
+            print("By default, only single interventions will be simulated. To simulate interventions on two variables simultaneously, set s.double_factor_interventions = True")
             s = SimpleNamespace(**{"interaction_terms" : 1,
                                    "solve_analytically" : 0,
-                                   "double_factor_interventions" : 1})  # Default to double factor interventions
+                                   "double_factor_interventions" : 0})  # Default to single-factor interventions
         else:
             print("No interaction terms specified so will solve linear SDM.")
             s = SimpleNamespace(**{"interaction_terms" : 0,
