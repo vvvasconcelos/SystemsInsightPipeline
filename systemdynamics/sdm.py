@@ -368,7 +368,7 @@ class SDM:
             sorted_columns = sorted_columns[:top_plot]
         return list(sorted_columns)
 
-    def sample_model_parameters(self): #, intervention_auxiliaries=None):
+    def sample_model_parameters(self):
         """ Sample from the model parameters using a bounded uniform distribution. 
             The possible parameters are given by the adjacency and interactions matrices.
         """
@@ -385,7 +385,7 @@ class SDM:
         par_int_count_stocks = 0
         par_int_count_auxiliaries = 0
     
-        for i, var in enumerate(self.variables):
+        for i, var in enumerate(self.stocks_and_auxiliaries):
             # Intercept
             if var in self.stocks_and_auxiliaries:
                 params[var]["Intercept"] = 0
