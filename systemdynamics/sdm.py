@@ -334,11 +334,11 @@ class SDM:
             }
         
         # Collect all near-optimal solutions
-        best_effect_size = -result.fun
+        best_effect_size = -result.fun if maximize else result.fun
         equilibria = []
         
         for i_set, val in zip(result.xl, result.funl):
-            current_effect_size = -val
+            current_effect_size = -val if maximize else val
             if (best_effect_size - current_effect_size) <= threshold_effect:
                 intervention_dict = {name: round(float(intensity), 4) 
                                    for name, intensity in zip(self.intervention_variables, i_set)}
