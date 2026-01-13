@@ -35,7 +35,7 @@ class Extract:
         else:
             print("No interaction terms specified so will solve linear SDM.")
             s = SimpleNamespace(**{"interaction_terms" : 0,
-                                   "solve_analytically" : 1,
+                                   "solve_analytically" : 0,
                                    "double_factor_interventions" : 0})
             #s.interaction_terms = False
 

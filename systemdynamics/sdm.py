@@ -18,7 +18,7 @@ class SDM:
         self.interactions_matrix = s.interactions_matrix
         self.interaction_terms = s.interaction_terms
         self.double_factor_interventions = s.double_factor_interventions
-        self.solve_analytically = False  # Use numerical solver by default (faster, more stable)
+        self.solve_analytically = s.solve_analytically
         self.stocks_and_auxiliaries = s.stocks_and_auxiliaries
         self.stocks_and_constants = s.stocks_and_constants
         self.constants = s.constants
