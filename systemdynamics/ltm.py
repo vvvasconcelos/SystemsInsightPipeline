@@ -6,13 +6,14 @@ https://arxiv.org/abs/1908.11434
 
 This module implements quantitative loop dominance analysis following the LTM method:
 
-1. **Link scores** (Equation 1 in paper): For non-integration links,
-   - Δz_x = ceteris paribus change in z due to x changing (other inputs held at t-Δt values)
+1. **Link scores** (Equation 1): For all links (including to stocks),
+   - Δz_x = ceteris paribus change = f(x_t, y_{t-1}, ...) - f(x_{t-1}, y_{t-1}, ...)
+   - For stocks: Δz_x ≈ dt * Δ(RHS)_x (consistent with SDM without explicit flows)
    - link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
    - Magnitude can exceed 1 when there are cancellations among inputs
-
-2. **Flow→Stock link scores** (Equation 2): For integration links,
-   - score = flow_value / net_flow (positive for inflows, negative for outflows)
+   
+2. **Equation evaluation**: Properly includes Intercept and interaction terms (A * B)
+   from the params dictionary, consistent with SDM equation structure.
    
 3. **Loop scores**: Product of link scores around feedback loops (can exceed 1)
 
@@ -85,7 +86,6 @@ class LoopsThatMatter:
         For each variable, stores:
         - inputs: list of variables that directly affect it
         - is_stock: whether it's a stock (integrated) variable
-        - is_flow_target: for stocks, the "flow" is the rate of change
         """
         self.var_inputs = {}
         self.var_is_stock = {}
@@ -203,91 +203,113 @@ class LoopsThatMatter:
             return params[target][source]
         return 0.0
     
-    def _evaluate_target_ceteris_paribus(self, target, source, var_values_curr, var_values_prev, params):
+    def _eval_equation(self, target, values, params):
         """
-        Evaluate target with source at current value, all other inputs at previous values.
+        Evaluate a target equation from params (same logic as SDM).
         
-        This computes the ceteris paribus change Δz_x from LTM Equation 1.
+        Handles Intercept and interaction terms (A * B).
         
-        For a linear model z = Σ(coef_i * x_i), this is:
-            z_ceteris_paribus = coef_source * source_curr + Σ(coef_i * x_i_prev) for i != source
+        Args:
+            target: Target variable name
+            values: Dict of variable values
+            params: Parameter dictionary
+        
+        Returns:
+            Evaluated equation value (RHS for stocks, value for auxiliaries)
+        """
+        eq = params.get(target, {})
+        total = float(eq.get("Intercept", 0.0))
+        
+        for term, coef in eq.items():
+            if term == "Intercept":
+                continue
+            if "*" in term:
+                # Interaction term: A * B
+                parts = [p.strip() for p in term.split("*")]
+                if len(parts) == 2:
+                    a, b = parts
+                    total += float(coef) * float(values.get(a, 0.0)) * float(values.get(b, 0.0))
+            else:
+                # Linear term
+                total += float(coef) * float(values.get(term, 0.0))
+        
+        return total
+    
+    def _delta_z_ceteris(self, target, source, curr_vals, prev_vals, params):
+        """
+        Compute ceteris paribus Δz_x by evaluating with mixed values.
+        
+        Δz_x = f(x_t, others_{t-1}) - f(x_{t-1}, others_{t-1})
+        
+        Both baseline and ceteris are computed by evaluating the same equation
+        function (including intercept and interactions).
         
         Args:
             target: Target variable name
             source: Source variable name (the one that changes)
-            var_values_curr: Dict of variable values at current time
-            var_values_prev: Dict of variable values at previous time
+            curr_vals: Dict of variable values at current time
+            prev_vals: Dict of variable values at previous time
             params: Parameter dictionary
         
         Returns:
-            The value of target if only source had changed
+            Ceteris paribus change Δz_x
         """
-        result = 0.0
+        # Baseline: all inputs at t-1
+        z_base = self._eval_equation(target, prev_vals, params)
         
-        # Get all inputs to target
-        for input_var in self.var_inputs.get(target, []):
-            coef = self._get_link_coefficient(input_var, target, params)
-            
-            if input_var == source:
-                # Use current value for the source
-                result += coef * var_values_curr.get(input_var, 0.0)
-            else:
-                # Use previous value for all other inputs (ceteris paribus)
-                result += coef * var_values_prev.get(input_var, 0.0)
+        # Ceteris paribus: source at t, all others at t-1
+        mixed = dict(prev_vals)
+        mixed[source] = curr_vals.get(source, mixed.get(source, 0.0))
+        z_cet = self._eval_equation(target, mixed, params)
         
-        return result
+        return z_cet - z_base
     
-    def _compute_net_flow_for_stock(self, stock, var_values, params):
+    def _active_links_from_params(self, params):
         """
-        Compute the net flow into a stock variable.
+        Get active links from params (captures interaction parents).
         
-        For stocks, the "net flow" is dx/dt = Σ(coef_i * x_i) for all inputs.
+        This is more accurate than using the adjacency matrix because it
+        includes parents from interaction terms like "A * B".
         
         Args:
-            stock: Stock variable name
-            var_values: Dict of current variable values
             params: Parameter dictionary
         
         Returns:
-            Net flow value
+            Sorted list of (source, target) tuples
         """
-        net_flow = 0.0
-        for input_var in self.var_inputs.get(stock, []):
-            coef = self._get_link_coefficient(input_var, stock, params)
-            net_flow += coef * var_values.get(input_var, 0.0)
-        return net_flow
-    
-    def _compute_flow_contribution(self, source, stock, var_values, params):
-        """
-        Compute the flow contribution from source to stock.
-        
-        This is coef * source_value, which contributes to the stock's rate of change.
-        
-        Args:
-            source: Source variable name
-            stock: Stock variable name
-            var_values: Dict of current variable values
-            params: Parameter dictionary
-        
-        Returns:
-            Flow contribution value
-        """
-        coef = self._get_link_coefficient(source, stock, params)
-        return coef * var_values.get(source, 0.0)
+        links = set()
+        for target, eq in params.items():
+            if not isinstance(eq, dict):
+                continue
+            for term in eq:
+                if term == "Intercept":
+                    continue
+                if "*" in term:
+                    # Interaction term: both A and B are parents
+                    parts = [p.strip() for p in term.split("*")]
+                    for parent in parts:
+                        if parent in self.variables:
+                            links.add((parent, target))
+                else:
+                    if term in self.variables:
+                        links.add((term, target))
+        return sorted(links)
     
     def compute_link_scores(self, df_sol, params, t_eval):
         """
         Compute LTM link scores for all links at each time step.
         
-        Implements Equation 1 (non-integration links) and Equation 2 (flow→stock links)
-        from Schoenberg, Davidsen & Eberlein (2019).
+        Implements Equation 1 from Schoenberg, Davidsen & Eberlein (2019) for all links.
         
-        For non-integration links (Equation 1):
+        For all links (including to stocks), we apply Equation 1:
             Δz_x = ceteris paribus change = f(x_t, y_{t-1}, ...) - f(x_{t-1}, y_{t-1}, ...)
             link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
             
-        For flow→stock links (Equation 2):
-            link_score = flow_contribution / net_flow
+        For stock targets, we map RHS changes to stock increments via dt:
+            Δz_x ≈ dt * Δ(RHS)_x
+            
+        This is consistent with the SDM representation where stocks don't have
+        explicit flow variables.
         
         Args:
             df_sol: Solution dataframe with variable values at each time step
@@ -297,21 +319,25 @@ class LoopsThatMatter:
         Returns:
             DataFrame with LTM link scores (can have magnitude > 1)
         """
-        ltm_scores_data = []      # True LTM scores
-        relative_scores_data = [] # Visualization scores (bounded)
+        ltm_scores_data = []
+        eps = 1e-10
         
-        # Get all active links from the adjacency matrix
-        active_links = []
+        # Get active links from params (captures interaction term parents)
+        active_links = self._active_links_from_params(params)
+        
+        # Also include links from adjacency matrix that might not be in params
         for target in self.df_adj.index:
             for source in self.df_adj.columns:
                 if self.df_adj.loc[target, source] != 0:
-                    active_links.append((source, target))
+                    if (source, target) not in active_links:
+                        active_links.append((source, target))
         
         n_times = len(t_eval)
         
         for t_idx in range(1, n_times):
             t = t_eval[t_idx]
             t_prev = t_eval[t_idx - 1]
+            dt = t - t_prev
             
             # Build value dictionaries for current and previous time
             var_values_curr = {}
@@ -323,46 +349,44 @@ class LoopsThatMatter:
             
             # Compute LTM link scores for each link
             time_ltm_scores = {}
-            time_relative_scores = {}
+            time_delta_z_x = {}  # Store raw Δz_x for diagnostics
             
             for source, target in active_links:
                 is_stock_target = target in self.stocks
                 
                 # Get actual changes
                 delta_source = var_values_curr.get(source, 0.0) - var_values_prev.get(source, 0.0)
-                delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
                 
                 if is_stock_target:
-                    # EQUATION 2: Flow→Stock link score
-                    # score = flow_contribution / net_flow
-                    net_flow_curr = self._compute_net_flow_for_stock(target, var_values_curr, params)
-                    flow_contrib = self._compute_flow_contribution(source, target, var_values_curr, params)
+                    # For stocks: observed change is stock increment
+                    delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
                     
-                    if abs(net_flow_curr) > 1e-10:
-                        ltm_score = flow_contrib / net_flow_curr
-                    else:
+                    if abs(delta_source) < eps or abs(delta_target) < eps:
                         ltm_score = 0.0
+                        delta_z_x = 0.0
+                    else:
+                        # Compute ceteris paribus change in RHS, then scale by dt
+                        delta_rhs_x = self._delta_z_ceteris(target, source, var_values_curr, var_values_prev, params)
+                        delta_z_x = dt * delta_rhs_x
                         
+                        if abs(delta_z_x) < eps:
+                            ltm_score = 0.0
+                        else:
+                            polarity = np.sign(delta_z_x / delta_source)
+                            magnitude = abs(delta_z_x / delta_target)
+                            ltm_score = polarity * magnitude
                 else:
-                    # EQUATION 1: Non-integration link score
-                    # Δz_x = f(x_t, others_{t-1}) - f(x_{t-1}, others_{t-1})
-                    # link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
+                    # For auxiliaries: use Equation 1 directly
+                    delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
                     
-                    if abs(delta_source) < 1e-10 or abs(delta_target) < 1e-10:
+                    if abs(delta_source) < eps or abs(delta_target) < eps:
                         ltm_score = 0.0
+                        delta_z_x = 0.0
                     else:
-                        # Compute ceteris paribus value (source at t, others at t-1)
-                        z_ceteris = self._evaluate_target_ceteris_paribus(
-                            target, source, var_values_curr, var_values_prev, params
-                        )
-                        # Compute baseline (all at t-1)
-                        z_baseline = var_values_prev.get(target, 0.0)
+                        # Compute ceteris paribus change
+                        delta_z_x = self._delta_z_ceteris(target, source, var_values_curr, var_values_prev, params)
                         
-                        # Δz_x = ceteris paribus change
-                        delta_z_x = z_ceteris - z_baseline
-                        
-                        # LTM score: sign(Δz_x/Δx) * |Δz_x/Δz|
-                        if abs(delta_z_x) < 1e-10:
+                        if abs(delta_z_x) < eps:
                             ltm_score = 0.0
                         else:
                             polarity = np.sign(delta_z_x / delta_source)
@@ -370,15 +394,17 @@ class LoopsThatMatter:
                             ltm_score = polarity * magnitude
                 
                 time_ltm_scores[(source, target)] = ltm_score
+                time_delta_z_x[(source, target)] = delta_z_x
             
             # Compute relative scores for visualization (normalize per target)
+            time_relative_scores = {}
             for target in set(t for s, t in active_links):
                 target_links = [(s, t) for s, t in active_links if t == target]
                 total_abs = sum(abs(time_ltm_scores.get(link, 0.0)) for link in target_links)
                 
                 for link in target_links:
                     ltm_score = time_ltm_scores.get(link, 0.0)
-                    if total_abs > 1e-10:
+                    if total_abs > eps:
                         relative_score = ltm_score / total_abs
                     else:
                         relative_score = 0.0
@@ -395,6 +421,7 @@ class LoopsThatMatter:
                     'target': target,
                     'ltm_link_score': time_ltm_scores.get((source, target), 0.0),
                     'relative_link_score': time_relative_scores.get((source, target), 0.0),
+                    'delta_z_x': time_delta_z_x.get((source, target), 0.0),  # Raw partial change
                     'delta_source': delta_source,
                     'delta_target': delta_target,
                     'is_stock_target': target in self.stocks
@@ -402,17 +429,16 @@ class LoopsThatMatter:
         
         self.ltm_link_scores_df = pd.DataFrame(ltm_scores_data)
         
-        # Create legacy-compatible link_scores_df with relative scores
-        # (for backward compatibility with existing visualization code)
+        # Create legacy-compatible link_scores_df
         legacy_data = []
         for _, row in self.ltm_link_scores_df.iterrows():
             legacy_data.append({
                 'time': row['time'],
                 'source': row['source'],
                 'target': row['target'],
-                'link_score': row['relative_link_score'],  # Use relative for visualization
-                'ltm_score': row['ltm_link_score'],        # Keep LTM score available
-                'raw_contribution': row['ltm_link_score'] * row['delta_target'] if row['delta_target'] != 0 else 0,
+                'link_score': row['relative_link_score'],
+                'ltm_score': row['ltm_link_score'],
+                'delta_z_x': row['delta_z_x'],  # Store meaningful raw contribution
                 'delta_target': row['delta_target']
             })
         self.link_scores_df = pd.DataFrame(legacy_data)
@@ -737,6 +763,15 @@ class LoopsThatMatter:
             rel_scores = group['relative_link_score'].values
             is_stock = group['is_stock_target'].iloc[0]
             
+            # Include delta_z_x statistics if available
+            delta_z_x_stats = {}
+            if 'delta_z_x' in group.columns:
+                delta_z_x = group['delta_z_x'].values
+                delta_z_x_stats = {
+                    'delta_z_x_mean': np.mean(delta_z_x),
+                    'delta_z_x_max_abs': np.max(np.abs(delta_z_x)),
+                }
+            
             summary_data.append({
                 'source': source,
                 'target': target,
@@ -747,7 +782,8 @@ class LoopsThatMatter:
                 'ltm_max': np.max(ltm_scores),
                 'rel_mean': np.mean(rel_scores),
                 'rel_max_abs': np.max(np.abs(rel_scores)),
-                'exceeds_1': np.any(np.abs(ltm_scores) > 1.0)
+                'exceeds_1': np.any(np.abs(ltm_scores) > 1.0),
+                **delta_z_x_stats
             })
         
         return pd.DataFrame(summary_data)
