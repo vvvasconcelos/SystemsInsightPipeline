@@ -196,7 +196,7 @@ class SDM:
 
     def optimize_intervention_intensities(self, params, costs, variable_of_interest=None, 
                                          bounds=None, initial_guess=None, method='global',
-                                         threshold_effect=0.01, n_samples=256, maximize=True):
+                                         threshold_effect=0.01, n_samples=None, maximize=True):
         """
         Optimize intervention intensities for a given parameter set subject to a cost constraint.
         
@@ -206,9 +206,11 @@ class SDM:
             variable_of_interest (str, optional): Variable to optimize for. If None, uses self.variable_of_interest[0]
             bounds (list, optional): Bounds for intensities. Default: [0, 5]
             initial_guess (array-like, optional): Initial guess for intensities (local method only)
-            method (str): Optimization method - 'local' (L-BFGS-B) or 'global' (SHGO). Default: 'global'
+            method (str): Optimization method - 'local' (L-BFGS-B, faster) or 'global' (SHGO, slower but finds multiple solutions). Default: 'global'
             threshold_effect (float): For global method - threshold to include near-optimal solutions. Default: 0.01
-            n_samples (int): For global method - number of samples for SHGO. Default: 256
+            n_samples (int, optional): For global method - number of SHGO samples using Sobol quasi-random sampling.
+                                      If None (default), automatically set to 3 * (n_interventions - 1) to account for 
+                                      effective dimensionality reduced by budget constraint. Use 'local' method for much faster optimization.
             maximize (bool): If True, maximize the variable of interest; if False, minimize it. Default: True
         
         Returns:
@@ -241,6 +243,13 @@ class SDM:
         
         if len(costs) != n_interventions:
             raise ValueError(f"Length of costs ({len(costs)}) must match number of intervention variables ({n_interventions})")
+        
+        # Auto-calculate n_samples based on effective dimensionality if not provided
+        if n_samples is None:
+            # Budget constraint reduces effective dimensionality to (n_interventions - 1)
+            # Use 3x effective dimension for reasonable Sobol coverage
+            effective_dim = n_interventions - 1
+            n_samples = max(30, 3 * effective_dim)  # At least 30 samples
         
         if method == 'local':
             return self._optimize_local(params, costs, variable_of_interest, bounds, initial_guess, maximize)
@@ -290,8 +299,15 @@ class SDM:
             'optimization_result': result
         }
     
-    def _optimize_global(self, params, costs, variable_of_interest, bounds=None, threshold_effect=0.01, n_samples=100, maximize=True, bounds_min=0, bounds_max=10):
-        """Global optimization using SHGO to find multiple near-optimal solutions."""
+    def _optimize_global(self, params, costs, variable_of_interest, bounds=None, threshold_effect=0.01, n_samples=50, maximize=True, bounds_min=0, bounds_max=10):
+        """Global optimization using SHGO with Sobol quasi-random sampling to find multiple near-optimal solutions.
+        
+        Args:
+            n_samples (int): Number of SHGO samples for Sobol quasi-random exploration. 
+                            Sobol provides space-filling samples, more efficient than random sampling.
+                            Note: With many variables (>10), even 50 samples can be slow.
+                            For faster optimization, consider using method='local' instead.
+        """
         n_interventions = len(self.intervention_variables)
         
         # Set default bounds for all variables
@@ -362,7 +378,7 @@ class SDM:
 
     def optimize_across_parameter_samples(self, costs, variable_of_interest=None, 
                                          bounds=None, initial_guess=None, method='global',
-                                         threshold_effect=0.01, n_samples=256, maximize=True):
+                                         threshold_effect=0.01, n_samples=None, maximize=True):
         """
         Run optimization across all parameter samples to get optimized intervention intensities per sample.
         
@@ -373,7 +389,9 @@ class SDM:
             initial_guess (array-like, optional): Initial guess for intensities (local method only)
             method (str): Optimization method - 'local' or 'global'. Default: 'global'
             threshold_effect (float): For global method - threshold for near-optimal solutions. Default: 0.01
-            n_samples (int): For global method - number of SHGO samples. Default: 256
+            n_samples (int, optional): For global method - number of SHGO samples using Sobol quasi-random sampling.
+                                      If None (default), automatically set to 3 * (n_interventions - 1) to account for 
+                                      effective dimensionality reduced by budget constraint.
             maximize (bool): If True, maximize the variable of interest; if False, minimize it. Default: True
         
         Returns:
