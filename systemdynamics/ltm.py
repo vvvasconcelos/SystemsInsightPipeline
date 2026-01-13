@@ -4,10 +4,19 @@ Loops That Matter (LTM) - Pathway-based loop dominance analysis for System Dynam
 Based on the theory described by Schoenberg, Davidsen and Eberlein (2019):
 https://arxiv.org/abs/1908.11434
 
-This module implements quantitative loop dominance analysis that:
-1. Computes link scores: contribution of each causal link to variable changes at each time step
-2. Combines link scores into loop scores: product of link scores around feedback loops
-3. Normalizes into relative loop scores: bounded measure (-1 to 1) of loop importance
+This module implements quantitative loop dominance analysis following the LTM method:
+
+1. **Link scores** (Equation 1 in paper): For non-integration links,
+   - Δz_x = ceteris paribus change in z due to x changing (other inputs held at t-Δt values)
+   - link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
+   - Magnitude can exceed 1 when there are cancellations among inputs
+
+2. **Flow→Stock link scores** (Equation 2): For integration links,
+   - score = flow_value / net_flow (positive for inflows, negative for outflows)
+   
+3. **Loop scores**: Product of link scores around feedback loops (can exceed 1)
+
+4. **Relative loop scores**: Normalized by sum of absolute loop scores (bounded to [-1, 1])
 
 The output is a pandas DataFrame suitable for analysis and visualization of loop dominance over time.
 """
@@ -24,14 +33,20 @@ class LoopsThatMatter:
     """
     Loops That Matter (LTM) analysis for System Dynamics models.
     
-    This class provides pathway-based loop dominance analysis, identifying which
-    feedback loops are responsible for generating observed model behavior at each
-    point in time.
+    Implements the pathway-based loop dominance method from Schoenberg, Davidsen & Eberlein (2019).
+    
+    Key distinction from simpler approaches:
+    - Link scores use ceteris paribus partial changes, not simple derivatives
+    - Link scores can have magnitude > 1 (indicating amplification or cancellation effects)
+    - Flow→stock links use special integration-based scoring
+    - Loop scores are products of link scores, normalized only at the final step
     
     Attributes:
         sdm: Reference to the SDM model instance
-        feedback_loops: List of feedback loops in the model (each loop is a list of variable names)
+        feedback_loops: List of feedback loops (each is a list of variable names)
         loop_names: List of loop names (e.g., "R1", "B1", etc.)
+        ltm_link_scores_df: DataFrame of proper LTM link scores (can be > 1)
+        relative_link_scores_df: DataFrame of visualization-friendly scores (bounded [-1,1])
     """
     
     def __init__(self, sdm):
@@ -52,9 +67,37 @@ class LoopsThatMatter:
         self.feedback_loops = self._find_feedback_loops()
         self.loop_names = self._name_loops()
         
-        # Store results
-        self.link_scores_df = None
+        # Build dependency graph for equation evaluation
+        self._build_dependency_info()
+        
+        # Store results - distinguish LTM scores from visualization scores
+        self.ltm_link_scores_df = None      # True LTM scores (Eq 1, can be > 1)
+        self.relative_link_scores_df = None  # For visualization (bounded [-1,1])
         self.loop_scores_df = None
+        
+        # Legacy alias
+        self.link_scores_df = None
+        
+    def _build_dependency_info(self):
+        """
+        Build information about variable dependencies for ceteris paribus evaluation.
+        
+        For each variable, stores:
+        - inputs: list of variables that directly affect it
+        - is_stock: whether it's a stock (integrated) variable
+        - is_flow_target: for stocks, the "flow" is the rate of change
+        """
+        self.var_inputs = {}
+        self.var_is_stock = {}
+        
+        for var in self.variables:
+            # Find all inputs to this variable from adjacency matrix
+            inputs = []
+            for source in self.df_adj.columns:
+                if self.df_adj.loc[var, source] != 0:
+                    inputs.append(source)
+            self.var_inputs[var] = inputs
+            self.var_is_stock[var] = var in self.stocks
         
     def _find_feedback_loops(self, max_length=None):
         """
@@ -160,14 +203,91 @@ class LoopsThatMatter:
             return params[target][source]
         return 0.0
     
+    def _evaluate_target_ceteris_paribus(self, target, source, var_values_curr, var_values_prev, params):
+        """
+        Evaluate target with source at current value, all other inputs at previous values.
+        
+        This computes the ceteris paribus change Δz_x from LTM Equation 1.
+        
+        For a linear model z = Σ(coef_i * x_i), this is:
+            z_ceteris_paribus = coef_source * source_curr + Σ(coef_i * x_i_prev) for i != source
+        
+        Args:
+            target: Target variable name
+            source: Source variable name (the one that changes)
+            var_values_curr: Dict of variable values at current time
+            var_values_prev: Dict of variable values at previous time
+            params: Parameter dictionary
+        
+        Returns:
+            The value of target if only source had changed
+        """
+        result = 0.0
+        
+        # Get all inputs to target
+        for input_var in self.var_inputs.get(target, []):
+            coef = self._get_link_coefficient(input_var, target, params)
+            
+            if input_var == source:
+                # Use current value for the source
+                result += coef * var_values_curr.get(input_var, 0.0)
+            else:
+                # Use previous value for all other inputs (ceteris paribus)
+                result += coef * var_values_prev.get(input_var, 0.0)
+        
+        return result
+    
+    def _compute_net_flow_for_stock(self, stock, var_values, params):
+        """
+        Compute the net flow into a stock variable.
+        
+        For stocks, the "net flow" is dx/dt = Σ(coef_i * x_i) for all inputs.
+        
+        Args:
+            stock: Stock variable name
+            var_values: Dict of current variable values
+            params: Parameter dictionary
+        
+        Returns:
+            Net flow value
+        """
+        net_flow = 0.0
+        for input_var in self.var_inputs.get(stock, []):
+            coef = self._get_link_coefficient(input_var, stock, params)
+            net_flow += coef * var_values.get(input_var, 0.0)
+        return net_flow
+    
+    def _compute_flow_contribution(self, source, stock, var_values, params):
+        """
+        Compute the flow contribution from source to stock.
+        
+        This is coef * source_value, which contributes to the stock's rate of change.
+        
+        Args:
+            source: Source variable name
+            stock: Stock variable name
+            var_values: Dict of current variable values
+            params: Parameter dictionary
+        
+        Returns:
+            Flow contribution value
+        """
+        coef = self._get_link_coefficient(source, stock, params)
+        return coef * var_values.get(source, 0.0)
+    
     def compute_link_scores(self, df_sol, params, t_eval):
         """
-        Compute link scores for all links at each time step.
+        Compute LTM link scores for all links at each time step.
         
-        The link score measures how much of the change in a target variable
-        is attributable to a source variable.
+        Implements Equation 1 (non-integration links) and Equation 2 (flow→stock links)
+        from Schoenberg, Davidsen & Eberlein (2019).
         
-        Link score = (∂target/∂source) * Δsource / Σ|all contributions to target|
+        For non-integration links (Equation 1):
+            Δz_x = ceteris paribus change = f(x_t, y_{t-1}, ...) - f(x_{t-1}, y_{t-1}, ...)
+            link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
+            
+        For flow→stock links (Equation 2):
+            link_score = flow_contribution / net_flow
         
         Args:
             df_sol: Solution dataframe with variable values at each time step
@@ -175,9 +295,10 @@ class LoopsThatMatter:
             t_eval: Array of time points
         
         Returns:
-            DataFrame with link scores indexed by time, columns are (source, target) tuples
+            DataFrame with LTM link scores (can have magnitude > 1)
         """
-        link_scores = {}
+        ltm_scores_data = []      # True LTM scores
+        relative_scores_data = [] # Visualization scores (bounded)
         
         # Get all active links from the adjacency matrix
         active_links = []
@@ -186,115 +307,144 @@ class LoopsThatMatter:
                 if self.df_adj.loc[target, source] != 0:
                     active_links.append((source, target))
         
-        # Initialize storage
-        for link in active_links:
-            link_scores[link] = []
-        
-        # Compute link scores for each time step (need at least 2 points)
         n_times = len(t_eval)
         
         for t_idx in range(1, n_times):
             t = t_eval[t_idx]
             t_prev = t_eval[t_idx - 1]
-            dt = t - t_prev
             
-            # Get variable values at current and previous time
-            for link in active_links:
-                source, target = link
-                
-                # Get coefficient (partial derivative)
-                coef = self._get_link_coefficient(source, target, params)
-                
-                # Get source change
-                if source in df_sol.columns:
-                    source_curr = df_sol.loc[t, source]
-                    source_prev = df_sol.loc[t_prev, source]
-                    delta_source = source_curr - source_prev
-                else:
-                    delta_source = 0.0
-                
-                # Get target change
-                if target in df_sol.columns:
-                    target_curr = df_sol.loc[t, target]
-                    target_prev = df_sol.loc[t_prev, target]
-                    delta_target = target_curr - target_prev
-                else:
-                    delta_target = 0.0
-                
-                # Compute contribution of this link to target change
-                contribution = coef * delta_source
-                
-                # Store raw contribution (we'll normalize later per target)
-                link_scores[link].append({
-                    'time': t,
-                    'contribution': contribution,
-                    'delta_target': delta_target
-                })
-        
-        # Convert to DataFrame and normalize per target
-        link_scores_data = []
-        
-        for t_idx in range(len(t_eval) - 1):
-            t = t_eval[t_idx + 1]
+            # Build value dictionaries for current and previous time
+            var_values_curr = {}
+            var_values_prev = {}
+            for var in self.variables:
+                if var in df_sol.columns:
+                    var_values_curr[var] = df_sol.loc[t, var]
+                    var_values_prev[var] = df_sol.loc[t_prev, var]
             
-            # Group by target to normalize
-            target_contributions = {}
+            # Compute LTM link scores for each link
+            time_ltm_scores = {}
+            time_relative_scores = {}
             
-            for link in active_links:
-                source, target = link
-                contrib_data = link_scores[link][t_idx]
+            for source, target in active_links:
+                is_stock_target = target in self.stocks
                 
-                if target not in target_contributions:
-                    target_contributions[target] = []
-                target_contributions[target].append({
-                    'link': link,
-                    'contribution': contrib_data['contribution'],
-                    'delta_target': contrib_data['delta_target']
-                })
-            
-            # Normalize and store
-            for target, contribs in target_contributions.items():
-                total_abs_contrib = sum(abs(c['contribution']) for c in contribs)
+                # Get actual changes
+                delta_source = var_values_curr.get(source, 0.0) - var_values_prev.get(source, 0.0)
+                delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
                 
-                for c in contribs:
-                    link = c['link']
-                    source = link[0]
+                if is_stock_target:
+                    # EQUATION 2: Flow→Stock link score
+                    # score = flow_contribution / net_flow
+                    net_flow_curr = self._compute_net_flow_for_stock(target, var_values_curr, params)
+                    flow_contrib = self._compute_flow_contribution(source, target, var_values_curr, params)
                     
-                    if total_abs_contrib > 1e-10:
-                        relative_score = c['contribution'] / total_abs_contrib
+                    if abs(net_flow_curr) > 1e-10:
+                        ltm_score = flow_contrib / net_flow_curr
+                    else:
+                        ltm_score = 0.0
+                        
+                else:
+                    # EQUATION 1: Non-integration link score
+                    # Δz_x = f(x_t, others_{t-1}) - f(x_{t-1}, others_{t-1})
+                    # link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
+                    
+                    if abs(delta_source) < 1e-10 or abs(delta_target) < 1e-10:
+                        ltm_score = 0.0
+                    else:
+                        # Compute ceteris paribus value (source at t, others at t-1)
+                        z_ceteris = self._evaluate_target_ceteris_paribus(
+                            target, source, var_values_curr, var_values_prev, params
+                        )
+                        # Compute baseline (all at t-1)
+                        z_baseline = var_values_prev.get(target, 0.0)
+                        
+                        # Δz_x = ceteris paribus change
+                        delta_z_x = z_ceteris - z_baseline
+                        
+                        # LTM score: sign(Δz_x/Δx) * |Δz_x/Δz|
+                        if abs(delta_z_x) < 1e-10:
+                            ltm_score = 0.0
+                        else:
+                            polarity = np.sign(delta_z_x / delta_source)
+                            magnitude = abs(delta_z_x / delta_target)
+                            ltm_score = polarity * magnitude
+                
+                time_ltm_scores[(source, target)] = ltm_score
+            
+            # Compute relative scores for visualization (normalize per target)
+            for target in set(t for s, t in active_links):
+                target_links = [(s, t) for s, t in active_links if t == target]
+                total_abs = sum(abs(time_ltm_scores.get(link, 0.0)) for link in target_links)
+                
+                for link in target_links:
+                    ltm_score = time_ltm_scores.get(link, 0.0)
+                    if total_abs > 1e-10:
+                        relative_score = ltm_score / total_abs
                     else:
                         relative_score = 0.0
-                    
-                    link_scores_data.append({
-                        'time': t,
-                        'source': source,
-                        'target': target,
-                        'link_score': relative_score,
-                        'raw_contribution': c['contribution'],
-                        'delta_target': c['delta_target']
-                    })
+                    time_relative_scores[link] = relative_score
+            
+            # Store scores
+            for source, target in active_links:
+                delta_source = var_values_curr.get(source, 0.0) - var_values_prev.get(source, 0.0)
+                delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
+                
+                ltm_scores_data.append({
+                    'time': t,
+                    'source': source,
+                    'target': target,
+                    'ltm_link_score': time_ltm_scores.get((source, target), 0.0),
+                    'relative_link_score': time_relative_scores.get((source, target), 0.0),
+                    'delta_source': delta_source,
+                    'delta_target': delta_target,
+                    'is_stock_target': target in self.stocks
+                })
         
-        self.link_scores_df = pd.DataFrame(link_scores_data)
-        return self.link_scores_df
+        self.ltm_link_scores_df = pd.DataFrame(ltm_scores_data)
+        
+        # Create legacy-compatible link_scores_df with relative scores
+        # (for backward compatibility with existing visualization code)
+        legacy_data = []
+        for _, row in self.ltm_link_scores_df.iterrows():
+            legacy_data.append({
+                'time': row['time'],
+                'source': row['source'],
+                'target': row['target'],
+                'link_score': row['relative_link_score'],  # Use relative for visualization
+                'ltm_score': row['ltm_link_score'],        # Keep LTM score available
+                'raw_contribution': row['ltm_link_score'] * row['delta_target'] if row['delta_target'] != 0 else 0,
+                'delta_target': row['delta_target']
+            })
+        self.link_scores_df = pd.DataFrame(legacy_data)
+        
+        return self.ltm_link_scores_df
     
-    def compute_loop_scores(self, link_scores_df=None):
+    def compute_loop_scores(self, link_scores_df=None, use_ltm_scores=True):
         """
         Compute loop scores by multiplying link scores around each feedback loop.
         
-        The loop score is the product of link scores for all links in the loop.
-        Relative loop scores are normalized to sum to 1 (in absolute value).
+        The loop score is the product of LTM link scores for all links in the loop.
+        Since LTM link scores can exceed 1, loop scores can also exceed 1.
+        
+        Relative loop scores are normalized by sum of absolute loop scores.
         
         Args:
-            link_scores_df: DataFrame of link scores (uses self.link_scores_df if None)
+            link_scores_df: DataFrame of link scores (uses self.ltm_link_scores_df if None)
+            use_ltm_scores: If True, use LTM scores (can be > 1). If False, use relative scores.
         
         Returns:
             DataFrame with loop scores indexed by time, one column per loop
         """
         if link_scores_df is None:
-            link_scores_df = self.link_scores_df
+            link_scores_df = self.ltm_link_scores_df
         
         if link_scores_df is None:
             raise ValueError("No link scores available. Call compute_link_scores first.")
+        
+        # Determine which score column to use
+        score_col = 'ltm_link_score' if use_ltm_scores else 'relative_link_score'
+        if score_col not in link_scores_df.columns:
+            score_col = 'link_score'  # Fallback for legacy format
         
         times = link_scores_df['time'].unique()
         
@@ -306,10 +456,11 @@ class LoopsThatMatter:
             # Create lookup for link scores at this time
             link_lookup = {}
             for _, row in t_data.iterrows():
-                link_lookup[(row['source'], row['target'])] = row['link_score']
+                link_lookup[(row['source'], row['target'])] = row[score_col]
             
             # Compute score for each loop
             loop_raw_scores = {}
+            loop_missing_links = {}
             
             for loop_idx, loop in enumerate(self.feedback_loops):
                 loop_name = self.loop_names[loop_idx]
@@ -317,7 +468,7 @@ class LoopsThatMatter:
                 
                 # Product of link scores around the loop
                 loop_score = 1.0
-                all_links_present = True
+                missing_links = []
                 
                 for i in range(n):
                     source = loop[i]
@@ -325,32 +476,35 @@ class LoopsThatMatter:
                     link = (source, target)
                     
                     if link in link_lookup:
-                        loop_score *= link_lookup[link]
+                        link_score = link_lookup[link]
+                        # Note: We multiply even if score is 0 (loop becomes 0)
+                        loop_score *= link_score
                     else:
-                        # Link not in scores, might be through auxiliaries
-                        # Use adjacency matrix sign
-                        adj_val = self.df_adj.loc[target, source]
-                        if adj_val != 0:
-                            loop_score *= np.sign(adj_val) if adj_val != -999 else 1.0
-                        else:
-                            all_links_present = False
-                            break
+                        # Link not computed - this is a problem for LTM
+                        # Record it and set loop score to NaN (unknown)
+                        missing_links.append(link)
                 
-                if all_links_present:
-                    loop_raw_scores[loop_name] = loop_score
+                if missing_links:
+                    # Cannot compute valid LTM score with missing links
+                    loop_raw_scores[loop_name] = np.nan
+                    loop_missing_links[loop_name] = missing_links
                 else:
-                    loop_raw_scores[loop_name] = 0.0
+                    loop_raw_scores[loop_name] = loop_score
             
-            # Normalize loop scores
-            total_abs = sum(abs(s) for s in loop_raw_scores.values())
+            # Normalize loop scores (only among non-NaN scores)
+            valid_scores = {k: v for k, v in loop_raw_scores.items() if not np.isnan(v)}
+            total_abs = sum(abs(s) for s in valid_scores.values())
             
             row_data = {'time': t}
             for loop_name, score in loop_raw_scores.items():
-                if total_abs > 1e-10:
+                row_data[f'{loop_name}_raw'] = score
+                
+                if np.isnan(score):
+                    row_data[f'{loop_name}_relative'] = np.nan
+                elif total_abs > 1e-10:
                     row_data[f'{loop_name}_relative'] = score / total_abs
                 else:
                     row_data[f'{loop_name}_relative'] = 0.0
-                row_data[f'{loop_name}_raw'] = score
             
             loop_scores_data.append(row_data)
         
@@ -533,19 +687,68 @@ class LoopsThatMatter:
         summary_data = []
         
         for loop_idx, loop_name in enumerate(self.loop_names):
-            col = f'{loop_name}_relative'
-            if col in loop_scores_df.columns:
-                scores = loop_scores_df[col].values
+            rel_col = f'{loop_name}_relative'
+            raw_col = f'{loop_name}_raw'
+            
+            if rel_col in loop_scores_df.columns:
+                rel_scores = loop_scores_df[rel_col].values
+                raw_scores = loop_scores_df[raw_col].values if raw_col in loop_scores_df.columns else rel_scores
+                
+                # Handle NaN values
+                rel_scores_clean = rel_scores[~np.isnan(rel_scores)]
+                raw_scores_clean = raw_scores[~np.isnan(raw_scores)]
                 
                 summary_data.append({
                     'loop_name': loop_name,
                     'loop_type': 'Reinforcing' if loop_name.startswith('R') else 'Balancing',
                     'loop_variables': ' → '.join(self.feedback_loops[loop_idx]),
-                    'mean_score': np.mean(scores),
-                    'max_abs_score': np.max(np.abs(scores)),
-                    'std_score': np.std(scores),
-                    'time_dominant': np.sum(np.abs(scores) == np.max(np.abs(loop_scores_df[[f'{ln}_relative' for ln in self.loop_names if f'{ln}_relative' in loop_scores_df.columns]].values), axis=1)) / len(scores)
+                    'mean_relative': np.mean(rel_scores_clean) if len(rel_scores_clean) > 0 else np.nan,
+                    'max_abs_relative': np.max(np.abs(rel_scores_clean)) if len(rel_scores_clean) > 0 else np.nan,
+                    'mean_raw': np.mean(raw_scores_clean) if len(raw_scores_clean) > 0 else np.nan,
+                    'max_abs_raw': np.max(np.abs(raw_scores_clean)) if len(raw_scores_clean) > 0 else np.nan,
+                    'std_relative': np.std(rel_scores_clean) if len(rel_scores_clean) > 0 else np.nan,
+                    'n_valid': len(rel_scores_clean),
+                    'n_total': len(rel_scores)
                 })
+        
+        return pd.DataFrame(summary_data)
+    
+    def get_link_score_summary(self, ltm_link_scores_df=None):
+        """
+        Get a summary of LTM link scores to verify correct implementation.
+        
+        This is useful for checking that link scores can exceed 1 in magnitude,
+        which is a key property of the LTM method.
+        
+        Returns:
+            DataFrame with summary statistics for each link
+        """
+        if ltm_link_scores_df is None:
+            ltm_link_scores_df = self.ltm_link_scores_df
+        
+        if ltm_link_scores_df is None:
+            raise ValueError("No link scores available. Call compute_link_scores first.")
+        
+        summary_data = []
+        links = ltm_link_scores_df.groupby(['source', 'target'])
+        
+        for (source, target), group in links:
+            ltm_scores = group['ltm_link_score'].values
+            rel_scores = group['relative_link_score'].values
+            is_stock = group['is_stock_target'].iloc[0]
+            
+            summary_data.append({
+                'source': source,
+                'target': target,
+                'is_stock_target': is_stock,
+                'ltm_mean': np.mean(ltm_scores),
+                'ltm_max_abs': np.max(np.abs(ltm_scores)),
+                'ltm_min': np.min(ltm_scores),
+                'ltm_max': np.max(ltm_scores),
+                'rel_mean': np.mean(rel_scores),
+                'rel_max_abs': np.max(np.abs(rel_scores)),
+                'exceeds_1': np.any(np.abs(ltm_scores) > 1.0)
+            })
         
         return pd.DataFrame(summary_data)
     
