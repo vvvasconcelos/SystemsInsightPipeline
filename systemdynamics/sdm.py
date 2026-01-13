@@ -290,7 +290,7 @@ class SDM:
             'optimization_result': result
         }
     
-    def _optimize_global(self, params, costs, variable_of_interest, bounds=None, threshold_effect=0.01, n_samples=256, maximize=True, bounds_min=0, bounds_max=10):
+    def _optimize_global(self, params, costs, variable_of_interest, bounds=None, threshold_effect=0.01, n_samples=100, maximize=True, bounds_min=0, bounds_max=10):
         """Global optimization using SHGO to find multiple near-optimal solutions."""
         n_interventions = len(self.intervention_variables)
         
@@ -322,7 +322,7 @@ class SDM:
         
         # Run global optimization
         result = shgo(objective, bounds, constraints=constraints, 
-                     n=n_samples, sampling_method='sobol')
+                     n=n_samples, sampling_method='sobol', options={'maxtime': 30})
         
         if not result.success:
             return {
