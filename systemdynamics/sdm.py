@@ -18,7 +18,7 @@ class SDM:
         self.interactions_matrix = s.interactions_matrix
         self.interaction_terms = s.interaction_terms
         self.double_factor_interventions = s.double_factor_interventions
-        self.solve_analytically = s.solve_analytically
+        self.solve_analytically = False  # Use numerical solver by default (faster, more stable)
         self.stocks_and_auxiliaries = s.stocks_and_auxiliaries
         self.stocks_and_constants = s.stocks_and_constants
         self.constants = s.constants
@@ -249,7 +249,7 @@ class SDM:
             # Budget constraint reduces effective dimensionality to (n_interventions - 1)
             # Use 3x effective dimension for reasonable Sobol coverage
             effective_dim = n_interventions - 1
-            n_samples = max(30, 3 * effective_dim)  # At least 30 samples
+            n_samples = max(10, 3 * effective_dim)  # At least 10 samples
         
         if method == 'local':
             return self._optimize_local(params, costs, variable_of_interest, bounds, initial_guess, maximize)
