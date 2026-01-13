@@ -4,20 +4,31 @@ Loops That Matter (LTM) - Pathway-based loop dominance analysis for System Dynam
 Based on the theory described by Schoenberg, Davidsen and Eberlein (2019):
 https://arxiv.org/abs/1908.11434
 
+With updated flow→stock scoring from "Improving Loops that Matter" (2023):
+https://doi.org/10.1002/sdr.1730
+
 This module implements quantitative loop dominance analysis following the LTM method:
 
-1. **Link scores** (Equation 1): For all links (including to stocks),
+1. **Link scores for non-integration links** (Equation 1):
    - Δz_x = ceteris paribus change = f(x_t, y_{t-1}, ...) - f(x_{t-1}, y_{t-1}, ...)
-   - For stocks: Δz_x ≈ dt * Δ(RHS)_x (consistent with SDM without explicit flows)
    - link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
    - Magnitude can exceed 1 when there are cancellations among inputs
    
-2. **Equation evaluation**: Properly includes Intercept and interaction terms (A * B)
+2. **Link scores for flow→stock links** (Updated Equation 3 from 2023 paper):
+   - link_score = Δflow / Δnet_flow
+   - This is representation-invariant (disaggregated vs aggregated flows give same result)
+   - More numerically stable than dividing by Δstock
+   
+3. **Equation evaluation**: Properly includes Intercept and interaction terms (A * B)
    from the params dictionary, consistent with SDM equation structure.
    
-3. **Loop scores**: Product of link scores around feedback loops (can exceed 1)
+4. **Loop scores**: Product of link scores around feedback loops (can exceed 1)
 
-4. **Relative loop scores**: Normalized by sum of absolute loop scores (bounded to [-1, 1])
+5. **Relative loop scores**: Normalized by sum of absolute loop scores (bounded to [-1, 1])
+
+Note: "Relative link scores" (per-target normalization) are a visualization convenience,
+not part of core LTM. They are computed separately and should not be confused with
+LTM link scores used for loop score products.
 
 The output is a pandas DataFrame suitable for analysis and visualization of loop dominance over time.
 """
@@ -295,21 +306,53 @@ class LoopsThatMatter:
                         links.add((term, target))
         return sorted(links)
     
+    def _compute_flow_contribution(self, source, target, values, params):
+        """
+        Compute the contribution of source to target's RHS (the "partial flow").
+        
+        For linear terms: coef * source_value
+        For interaction terms containing source: coef * source * other
+        
+        Args:
+            source: Source variable name
+            target: Target variable name  
+            values: Dict of variable values
+            params: Parameter dictionary
+        
+        Returns:
+            The contribution of source to target's RHS
+        """
+        eq = params.get(target, {})
+        contribution = 0.0
+        
+        for term, coef in eq.items():
+            if term == "Intercept":
+                continue
+            if "*" in term:
+                parts = [p.strip() for p in term.split("*")]
+                if source in parts:
+                    # This interaction term involves source
+                    product = float(coef)
+                    for p in parts:
+                        product *= float(values.get(p, 0.0))
+                    contribution += product
+            elif term == source:
+                contribution += float(coef) * float(values.get(source, 0.0))
+        
+        return contribution
+    
     def compute_link_scores(self, df_sol, params, t_eval):
         """
         Compute LTM link scores for all links at each time step.
         
-        Implements Equation 1 from Schoenberg, Davidsen & Eberlein (2019) for all links.
-        
-        For all links (including to stocks), we apply Equation 1:
-            Δz_x = ceteris paribus change = f(x_t, y_{t-1}, ...) - f(x_{t-1}, y_{t-1}, ...)
-            link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
-            
-        For stock targets, we map RHS changes to stock increments via dt:
-            Δz_x ≈ dt * Δ(RHS)_x
-            
-        This is consistent with the SDM representation where stocks don't have
-        explicit flow variables.
+        Implements:
+        - Equation 1 (non-integration links): link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
+        - Updated Equation 3 from "Improving Loops that Matter" (2023) for flow→stock:
+          link_score = Δflow / Δnet_flow
+          
+        The updated flow→stock formula uses change in flow / change in net flow,
+        which is representation-invariant (disaggregated vs aggregated flows give
+        same results) and more numerically stable than dividing by Δstock.
         
         Args:
             df_sol: Solution dataframe with variable values at each time step
@@ -337,7 +380,6 @@ class LoopsThatMatter:
         for t_idx in range(1, n_times):
             t = t_eval[t_idx]
             t_prev = t_eval[t_idx - 1]
-            dt = t - t_prev
             
             # Build value dictionaries for current and previous time
             var_values_curr = {}
@@ -347,36 +389,51 @@ class LoopsThatMatter:
                     var_values_curr[var] = df_sol.loc[t, var]
                     var_values_prev[var] = df_sol.loc[t_prev, var]
             
+            # Precompute net flow (total RHS) for stocks at both times
+            stock_rhs_curr = {}
+            stock_rhs_prev = {}
+            for stock in self.stocks:
+                stock_rhs_curr[stock] = self._eval_equation(stock, var_values_curr, params)
+                stock_rhs_prev[stock] = self._eval_equation(stock, var_values_prev, params)
+            
             # Compute LTM link scores for each link
             time_ltm_scores = {}
-            time_delta_z_x = {}  # Store raw Δz_x for diagnostics
+            time_delta_z_x = {}  # Store raw Δz_x or Δflow for diagnostics
             
             for source, target in active_links:
                 is_stock_target = target in self.stocks
                 
-                # Get actual changes
+                # Get actual change in source
                 delta_source = var_values_curr.get(source, 0.0) - var_values_prev.get(source, 0.0)
                 
                 if is_stock_target:
-                    # For stocks: observed change is stock increment
-                    delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
+                    # UPDATED EQUATION 3 from "Improving Loops that Matter" (2023):
+                    # link_score = Δflow / Δnet_flow
+                    # 
+                    # This is representation-invariant and more stable than Δstock-based.
+                    # "flow" here is the contribution of source to the stock's RHS.
                     
-                    if abs(delta_source) < eps or abs(delta_target) < eps:
+                    # Compute flow contribution at both times
+                    flow_curr = self._compute_flow_contribution(source, target, var_values_curr, params)
+                    flow_prev = self._compute_flow_contribution(source, target, var_values_prev, params)
+                    delta_flow = flow_curr - flow_prev
+                    
+                    # Compute change in net flow (total RHS)
+                    delta_net_flow = stock_rhs_curr[target] - stock_rhs_prev[target]
+                    
+                    if abs(delta_net_flow) < eps:
+                        # Near equilibrium or inflection point - score goes to 0
                         ltm_score = 0.0
-                        delta_z_x = 0.0
                     else:
-                        # Compute ceteris paribus change in RHS, then scale by dt
-                        delta_rhs_x = self._delta_z_ceteris(target, source, var_values_curr, var_values_prev, params)
-                        delta_z_x = dt * delta_rhs_x
-                        
-                        if abs(delta_z_x) < eps:
-                            ltm_score = 0.0
-                        else:
-                            polarity = np.sign(delta_z_x / delta_source)
-                            magnitude = abs(delta_z_x / delta_target)
-                            ltm_score = polarity * magnitude
+                        ltm_score = delta_flow / delta_net_flow
+                    
+                    delta_z_x = delta_flow  # Store the change in flow contribution
+                    
                 else:
-                    # For auxiliaries: use Equation 1 directly
+                    # EQUATION 1 (non-integration links):
+                    # Δz_x = f(x_t, others_{t-1}) - f(x_{t-1}, others_{t-1})
+                    # link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
+                    
                     delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
                     
                     if abs(delta_source) < eps or abs(delta_target) < eps:
@@ -397,6 +454,7 @@ class LoopsThatMatter:
                 time_delta_z_x[(source, target)] = delta_z_x
             
             # Compute relative scores for visualization (normalize per target)
+            # Note: This is a visualization convenience, not core LTM
             time_relative_scores = {}
             for target in set(t for s, t in active_links):
                 target_links = [(s, t) for s, t in active_links if t == target]
@@ -413,7 +471,10 @@ class LoopsThatMatter:
             # Store scores
             for source, target in active_links:
                 delta_source = var_values_curr.get(source, 0.0) - var_values_prev.get(source, 0.0)
-                delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
+                if target in self.stocks:
+                    delta_target = stock_rhs_curr[target] - stock_rhs_prev[target]  # Δnet_flow for stocks
+                else:
+                    delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
                 
                 ltm_scores_data.append({
                     'time': t,
@@ -421,9 +482,9 @@ class LoopsThatMatter:
                     'target': target,
                     'ltm_link_score': time_ltm_scores.get((source, target), 0.0),
                     'relative_link_score': time_relative_scores.get((source, target), 0.0),
-                    'delta_z_x': time_delta_z_x.get((source, target), 0.0),  # Raw partial change
+                    'delta_z_x': time_delta_z_x.get((source, target), 0.0),
                     'delta_source': delta_source,
-                    'delta_target': delta_target,
+                    'delta_target': delta_target,  # For stocks: Δnet_flow; for aux: Δaux
                     'is_stock_target': target in self.stocks
                 })
         
@@ -438,7 +499,7 @@ class LoopsThatMatter:
                 'target': row['target'],
                 'link_score': row['relative_link_score'],
                 'ltm_score': row['ltm_link_score'],
-                'delta_z_x': row['delta_z_x'],  # Store meaningful raw contribution
+                'delta_z_x': row['delta_z_x'],
                 'delta_target': row['delta_target']
             })
         self.link_scores_df = pd.DataFrame(legacy_data)
@@ -545,7 +606,9 @@ class LoopsThatMatter:
         
         Args:
             params: Parameter dictionary for the model
-            t_start: Start time for simulation
+            t_start: Start time for simulation. Note: if using analytical solver 
+                     with t_start != 0, results may be inconsistent as analytical
+                     solutions typically assume initial condition at t=0.
             t_end: End time for simulation (uses model default if None)
             n_points: Number of time points to evaluate
             intervention_intensities: Array of intensities for each intervention variable.
@@ -560,6 +623,16 @@ class LoopsThatMatter:
         """
         if t_end is None:
             t_end = self.sdm.t_span[1]
+        
+        # Warn about t_start != 0 with analytical solver
+        if t_start != 0 and hasattr(self.sdm, 'solve_analytically') and self.sdm.solve_analytically:
+            import warnings
+            warnings.warn(
+                f"t_start={t_start} with analytical solver may produce inconsistent results. "
+                "Analytical solutions typically assume initial condition at t=0. "
+                "Consider using numerical solver or t_start=0.",
+                UserWarning
+            )
         
         t_eval = np.linspace(t_start, t_end, n_points)
         
