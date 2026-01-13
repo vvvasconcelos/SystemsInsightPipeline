@@ -357,8 +357,9 @@ class LoopsThatMatter:
         self.loop_scores_df = pd.DataFrame(loop_scores_data)
         return self.loop_scores_df
     
-    def run_ltm_analysis(self, params, t_start=0, t_end=None, n_points=100, x0=None, 
-                         constants_values=None, progress_bar=True):
+    def run_ltm_analysis(self, params, t_start=0, t_end=None, n_points=100, 
+                         intervention_intensities=None, intervention_variable=None,
+                         progress_bar=True):
         """
         Run a complete LTM analysis: simulate the model and compute all scores.
         
@@ -367,8 +368,11 @@ class LoopsThatMatter:
             t_start: Start time for simulation
             t_end: End time for simulation (uses model default if None)
             n_points: Number of time points to evaluate
-            x0: Initial conditions for stocks (zeros if None)
-            constants_values: Values for constants (zeros if None)
+            intervention_intensities: Array of intensities for each intervention variable.
+                                     If None, no intervention is applied.
+                                     Can also be a single float if intervention_variable is specified.
+            intervention_variable: If specified with a single intensity, apply intervention
+                                  to this variable only (others get 0).
             progress_bar: Whether to show progress bar
         
         Returns:
@@ -379,27 +383,41 @@ class LoopsThatMatter:
         
         t_eval = np.linspace(t_start, t_end, n_points)
         
-        # Set up initial conditions
-        if x0 is None:
-            x0 = np.zeros(len(self.stocks), dtype=np.float64)
-        if constants_values is None:
-            constants_values = np.zeros(len(self.constants), dtype=np.float64)
-        
-        # Get system matrices
-        if self.sdm.interaction_terms:
-            A, b = None, None
+        # Handle intervention intensities
+        if intervention_intensities is not None:
+            if intervention_variable is not None:
+                # Single variable intervention
+                intensities = np.zeros(len(self.sdm.intervention_variables))
+                var_idx = self.sdm.intervention_variables.index(intervention_variable)
+                intensities[var_idx] = intervention_intensities
+                intervention_intensities = intensities
+            else:
+                intervention_intensities = np.asarray(intervention_intensities)
+            
+            # Use the SDM method to run with interventions
+            # Store original t_eval
+            original_t_eval = self.sdm.t_eval
+            self.sdm.t_eval = t_eval
+            
+            df_sol = self.sdm.run_SDM_with_intervention_intensities(intervention_intensities, params)
+            
+            self.sdm.t_eval = original_t_eval
         else:
-            A, b = self.sdm.params_to_A_b(params, constants_values)
-        
-        # Store original t_eval and set new one for detailed simulation
-        original_t_eval = self.sdm.t_eval
-        self.sdm.t_eval = t_eval
-        
-        # Run simulation
-        df_sol = self.sdm.run_SDM(x0, constants_values, A, b, params)
-        
-        # Restore original t_eval
-        self.sdm.t_eval = original_t_eval
+            # No intervention - run baseline
+            x0 = np.zeros(len(self.stocks), dtype=np.float64)
+            constants_values = np.zeros(len(self.constants), dtype=np.float64)
+            
+            if self.sdm.interaction_terms:
+                A, b = None, None
+            else:
+                A, b = self.sdm.params_to_A_b(params, constants_values)
+            
+            original_t_eval = self.sdm.t_eval
+            self.sdm.t_eval = t_eval
+            
+            df_sol = self.sdm.run_SDM(x0, constants_values, A, b, params)
+            
+            self.sdm.t_eval = original_t_eval
         
         # Compute link and loop scores
         link_scores_df = self.compute_link_scores(df_sol, params, t_eval)
@@ -407,7 +425,8 @@ class LoopsThatMatter:
         
         return df_sol, link_scores_df, loop_scores_df
     
-    def run_ltm_across_samples(self, n_samples=None, t_start=0, t_end=None, n_points=50):
+    def run_ltm_across_samples(self, n_samples=None, t_start=0, t_end=None, n_points=50,
+                                intervention_intensities=None, intervention_variable=None):
         """
         Run LTM analysis across multiple parameter samples and aggregate results.
         
@@ -419,6 +438,10 @@ class LoopsThatMatter:
             t_start: Start time for simulation
             t_end: End time for simulation
             n_points: Number of time points per simulation
+            intervention_intensities: Array of intensities for each intervention variable.
+                                     If None, no intervention is applied.
+            intervention_variable: If specified with a single intensity, apply intervention
+                                  to this variable only.
         
         Returns:
             DataFrame with aggregated loop scores (mean, std, etc.) across samples
@@ -433,9 +456,12 @@ class LoopsThatMatter:
             params = self.sdm.sample_model_parameters()
             
             try:
-                # Run LTM analysis
+                # Run LTM analysis with intervention
                 _, _, loop_scores_df = self.run_ltm_analysis(
-                    params, t_start, t_end, n_points, progress_bar=False
+                    params, t_start, t_end, n_points, 
+                    intervention_intensities=intervention_intensities,
+                    intervention_variable=intervention_variable,
+                    progress_bar=False
                 )
                 
                 # Add sample index
