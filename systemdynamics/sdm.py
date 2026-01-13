@@ -296,18 +296,17 @@ class SDM:
         
         # Set default bounds for all variables
         if bounds is None:
-            # Auto-calculate conservative bounds based on budget constraint
-            # To ensure feasibility: if all interventions are at max, constraint must be satisfied
-            # So: n_interventions * safe_max * max_cost <= 1.0
-            # Therefore: safe_max <= 1.0 / (n_interventions * max_cost)
+            # Set individual bounds for each intervention based on budget constraint
+            # Each intervention can individually use the full budget: intensity_i <= 1.0 / cost_i
+            # This allows the optimizer more flexibility while constraint ensures feasibility
             costs_array = np.asarray(costs)
-            max_cost = np.max(costs_array)
-            if max_cost > 0:
-                # Conservative upper bound that guarantees feasibility
-                safe_max = 1.0 / (n_interventions * max_cost)
-                bounds = [(bounds_min, min(safe_max, bounds_max)) for _ in range(n_interventions)]
-            else:
-                bounds = [(bounds_min, bounds_max) for _ in range(n_interventions)]
+            bounds = []
+            for cost in costs_array:
+                if cost > 0:
+                    max_for_this_intervention = 1.0 / cost
+                    bounds.append((bounds_min, min(max_for_this_intervention, bounds_max)))
+                else:
+                    bounds.append((bounds_min, bounds_max))
         
         # Objective function for all variables
         def objective(intensities):
