@@ -383,41 +383,46 @@ class LoopsThatMatter:
         
         t_eval = np.linspace(t_start, t_end, n_points)
         
-        # Handle intervention intensities
-        if intervention_intensities is not None:
-            if intervention_variable is not None:
-                # Single variable intervention
-                intensities = np.zeros(len(self.sdm.intervention_variables))
-                var_idx = self.sdm.intervention_variables.index(intervention_variable)
-                intensities[var_idx] = intervention_intensities
-                intervention_intensities = intensities
+        # Store original t_eval and t_span
+        original_t_eval = self.sdm.t_eval
+        original_t_span = self.sdm.t_span
+        
+        # Set new t_eval for detailed time points
+        self.sdm.t_eval = t_eval
+        self.sdm.t_span = [t_start, t_end]
+        
+        try:
+            # Handle intervention intensities
+            if intervention_intensities is not None:
+                if intervention_variable is not None:
+                    # Single variable intervention
+                    intensities = np.zeros(len(self.sdm.intervention_variables))
+                    var_idx = self.sdm.intervention_variables.index(intervention_variable)
+                    intensities[var_idx] = float(intervention_intensities)
+                    intervention_intensities = intensities
+                else:
+                    # Convert to numpy array and ensure float type
+                    intervention_intensities = np.asarray(intervention_intensities, dtype=np.float64)
+                    # Replace any NaN with 0
+                    intervention_intensities = np.nan_to_num(intervention_intensities, nan=0.0)
+                
+                # Use the SDM method to run with interventions
+                df_sol = self.sdm.run_SDM_with_intervention_intensities(intervention_intensities, params)
             else:
-                intervention_intensities = np.asarray(intervention_intensities)
-            
-            # Use the SDM method to run with interventions
-            # Store original t_eval
-            original_t_eval = self.sdm.t_eval
-            self.sdm.t_eval = t_eval
-            
-            df_sol = self.sdm.run_SDM_with_intervention_intensities(intervention_intensities, params)
-            
+                # No intervention - run baseline
+                x0 = np.zeros(len(self.stocks), dtype=np.float64)
+                constants_values = np.zeros(len(self.constants), dtype=np.float64)
+                
+                if self.sdm.interaction_terms:
+                    A, b = None, None
+                else:
+                    A, b = self.sdm.params_to_A_b(params, constants_values)
+                
+                df_sol = self.sdm.run_SDM(x0, constants_values, A, b, params)
+        finally:
+            # Restore original t_eval and t_span
             self.sdm.t_eval = original_t_eval
-        else:
-            # No intervention - run baseline
-            x0 = np.zeros(len(self.stocks), dtype=np.float64)
-            constants_values = np.zeros(len(self.constants), dtype=np.float64)
-            
-            if self.sdm.interaction_terms:
-                A, b = None, None
-            else:
-                A, b = self.sdm.params_to_A_b(params, constants_values)
-            
-            original_t_eval = self.sdm.t_eval
-            self.sdm.t_eval = t_eval
-            
-            df_sol = self.sdm.run_SDM(x0, constants_values, A, b, params)
-            
-            self.sdm.t_eval = original_t_eval
+            self.sdm.t_span = original_t_span
         
         # Compute link and loop scores
         link_scores_df = self.compute_link_scores(df_sol, params, t_eval)
