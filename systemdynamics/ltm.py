@@ -306,24 +306,27 @@ class LoopsThatMatter:
                         links.add((term, target))
         return sorted(links)
     
-    def _compute_flow_contribution(self, source, target, values, params):
+    def _get_structural_polarity(self, source, target, params):
         """
-        Compute the contribution of source to target's RHS (the "partial flow").
+        Get the structural polarity of a link from source to target.
         
-        For linear terms: coef * source_value
-        For interaction terms containing source: coef * source * other
+        For linear terms: sign of coefficient
+        For interaction terms: sign of coefficient (assuming positive values of other variables)
+        
+        This is used to maintain structural polarity in link scores, rather than
+        letting polarity emerge from division of signed quantities (which can flip
+        incorrectly at turning points).
         
         Args:
             source: Source variable name
-            target: Target variable name  
-            values: Dict of variable values
+            target: Target variable name
             params: Parameter dictionary
         
         Returns:
-            The contribution of source to target's RHS
+            +1 or -1 for structural polarity, 0 if no direct link
         """
         eq = params.get(target, {})
-        contribution = 0.0
+        total_coef = 0.0
         
         for term, coef in eq.items():
             if term == "Intercept":
@@ -331,28 +334,36 @@ class LoopsThatMatter:
             if "*" in term:
                 parts = [p.strip() for p in term.split("*")]
                 if source in parts:
-                    # This interaction term involves source
-                    product = float(coef)
-                    for p in parts:
-                        product *= float(values.get(p, 0.0))
-                    contribution += product
+                    # Interaction term - use coefficient sign
+                    total_coef += float(coef)
             elif term == source:
-                contribution += float(coef) * float(values.get(source, 0.0))
+                total_coef += float(coef)
         
-        return contribution
+        if abs(total_coef) < 1e-10:
+            # Fall back to adjacency matrix
+            adj_val = self.df_adj.loc[target, source]
+            if adj_val == -999:
+                return 1  # Unknown polarity, assume positive
+            return int(np.sign(adj_val)) if adj_val != 0 else 0
+        
+        return int(np.sign(total_coef))
     
     def compute_link_scores(self, df_sol, params, t_eval):
         """
         Compute LTM link scores for all links at each time step.
         
         Implements:
-        - Equation 1 (non-integration links): link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
-        - Updated Equation 3 from "Improving Loops that Matter" (2023) for flow→stock:
-          link_score = Δflow / Δnet_flow
+        - Equation 1 (all links): Uses ceteris paribus partial change
+        - Updated magnitude formula from "Improving Loops that Matter" (2023) for stocks:
+          magnitude = |Δz_x| / |Δnet_flow|
           
-        The updated flow→stock formula uses change in flow / change in net flow,
-        which is representation-invariant (disaggregated vs aggregated flows give
-        same results) and more numerically stable than dividing by Δstock.
+        Polarity is computed from structural coefficient signs, not from division
+        of signed quantities (which can flip incorrectly at turning points).
+        
+        This ensures:
+        - Consistent ceteris paribus treatment for all targets (stocks and auxiliaries)
+        - Structural polarity preserved (inflow positive, outflow negative)
+        - Representation-invariant flow→stock scoring
         
         Args:
             df_sol: Solution dataframe with variable values at each time step
@@ -374,6 +385,11 @@ class LoopsThatMatter:
                 if self.df_adj.loc[target, source] != 0:
                     if (source, target) not in active_links:
                         active_links.append((source, target))
+        
+        # Precompute structural polarities for all links
+        structural_polarities = {}
+        for source, target in active_links:
+            structural_polarities[(source, target)] = self._get_structural_polarity(source, target, params)
         
         n_times = len(t_eval)
         
@@ -398,7 +414,7 @@ class LoopsThatMatter:
             
             # Compute LTM link scores for each link
             time_ltm_scores = {}
-            time_delta_z_x = {}  # Store raw Δz_x or Δflow for diagnostics
+            time_delta_z_x = {}  # Store raw Δz_x for diagnostics
             
             for source, target in active_links:
                 is_stock_target = target in self.stocks
@@ -406,49 +422,38 @@ class LoopsThatMatter:
                 # Get actual change in source
                 delta_source = var_values_curr.get(source, 0.0) - var_values_prev.get(source, 0.0)
                 
+                # Get structural polarity (from coefficients, not from behavior)
+                structural_polarity = structural_polarities[(source, target)]
+                
+                # Compute ceteris paribus change (consistent for both stocks and auxiliaries)
+                delta_z_x = self._delta_z_ceteris(target, source, var_values_curr, var_values_prev, params)
+                
                 if is_stock_target:
-                    # UPDATED EQUATION 3 from "Improving Loops that Matter" (2023):
-                    # link_score = Δflow / Δnet_flow
-                    # 
-                    # This is representation-invariant and more stable than Δstock-based.
-                    # "flow" here is the contribution of source to the stock's RHS.
-                    
-                    # Compute flow contribution at both times
-                    flow_curr = self._compute_flow_contribution(source, target, var_values_curr, params)
-                    flow_prev = self._compute_flow_contribution(source, target, var_values_prev, params)
-                    delta_flow = flow_curr - flow_prev
-                    
-                    # Compute change in net flow (total RHS)
+                    # For stocks: use |Δz_x| / |Δnet_flow| for magnitude
+                    # This is the updated formula from "Improving LTM" (2023)
                     delta_net_flow = stock_rhs_curr[target] - stock_rhs_prev[target]
                     
-                    if abs(delta_net_flow) < eps:
-                        # Near equilibrium or inflection point - score goes to 0
+                    if abs(delta_net_flow) < eps or abs(delta_z_x) < eps:
                         ltm_score = 0.0
                     else:
-                        ltm_score = delta_flow / delta_net_flow
-                    
-                    delta_z_x = delta_flow  # Store the change in flow contribution
+                        # Magnitude from absolute values (representation-invariant)
+                        magnitude = abs(delta_z_x) / abs(delta_net_flow)
+                        # Polarity from structural coefficient sign (not from division)
+                        ltm_score = structural_polarity * magnitude
                     
                 else:
-                    # EQUATION 1 (non-integration links):
-                    # Δz_x = f(x_t, others_{t-1}) - f(x_{t-1}, others_{t-1})
-                    # link_score = sign(Δz_x/Δx) * |Δz_x/Δz|
-                    
+                    # For auxiliaries: standard Equation 1
                     delta_target = var_values_curr.get(target, 0.0) - var_values_prev.get(target, 0.0)
                     
-                    if abs(delta_source) < eps or abs(delta_target) < eps:
+                    if abs(delta_source) < eps or abs(delta_target) < eps or abs(delta_z_x) < eps:
                         ltm_score = 0.0
-                        delta_z_x = 0.0
                     else:
-                        # Compute ceteris paribus change
-                        delta_z_x = self._delta_z_ceteris(target, source, var_values_curr, var_values_prev, params)
-                        
-                        if abs(delta_z_x) < eps:
-                            ltm_score = 0.0
-                        else:
-                            polarity = np.sign(delta_z_x / delta_source)
-                            magnitude = abs(delta_z_x / delta_target)
-                            ltm_score = polarity * magnitude
+                        # Magnitude from absolute values
+                        magnitude = abs(delta_z_x) / abs(delta_target)
+                        # LTM: Sign is STRUCTURAL, not behavioral
+                        # "the sign measures the structural polarity of the causal pathway"
+                        # (Schoenberg et al. 2023, System Dynamics Review)
+                        ltm_score = structural_polarity * magnitude
                 
                 time_ltm_scores[(source, target)] = ltm_score
                 time_delta_z_x[(source, target)] = delta_z_x
@@ -485,7 +490,8 @@ class LoopsThatMatter:
                     'delta_z_x': time_delta_z_x.get((source, target), 0.0),
                     'delta_source': delta_source,
                     'delta_target': delta_target,  # For stocks: Δnet_flow; for aux: Δaux
-                    'is_stock_target': target in self.stocks
+                    'is_stock_target': target in self.stocks,
+                    'structural_polarity': structural_polarities[(source, target)]
                 })
         
         self.ltm_link_scores_df = pd.DataFrame(ltm_scores_data)
