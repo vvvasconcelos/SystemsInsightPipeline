@@ -570,40 +570,74 @@ class SDM:
     
     def dz_dt_int(self, t, z, constants_values, params):
         """Compute dz/dt for nonlinear SDM with interaction terms using only NumPy."""
-        # Combine all variables into one vector
-        vals = {var: 0.0 for var in self.variables}
-        for s, v in zip(self.stocks, z):
-            vals[s] = v
-        for c, v in zip(self.constants, constants_values):
-            vals[c] = v
+        # Compute all variable values (stocks, constants, auxiliaries)
+        vals = self._compute_all_auxiliaries(z, constants_values, params)
 
-        # --- Compute auxiliaries ---
-        for aux in self.auxiliaries:
-            total = 0.0
-            for pred, val in params[aux].items():
-                if pred == 'Intercept':
-                    total += val
-                elif '*' in pred:
-                    v1, v2 = [p.strip() for p in pred.split('*')]
-                    total += val * vals[v1] * vals[v2]
-                else:
-                    total += val * vals[pred]
-            vals[aux] = total
-
-        # --- Compute stock derivatives ---
+        # Compute stock derivatives using shared equation evaluation
         dz = np.zeros(len(self.stocks))
-        for i, s in enumerate(self.stocks):
-            total = 0.0
-            for pred, val in params[s].items():
-                if pred == 'Intercept':
-                    total += val
-                elif '*' in pred:
-                    v1, v2 = [p.strip() for p in pred.split('*')]
-                    total += val * vals[v1] * vals[v2]
-                else:
-                    total += val * vals[pred]
-            dz[i] = total
+        for i, stock in enumerate(self.stocks):
+            dz[i] = self._compute_equation_value(stock, params, vals)
         return dz
+
+    def _compute_equation_value(self, var, params, vals):
+        """
+        Compute the value of any equation (auxiliary value or stock derivative).
+        
+        This is the single source of truth for equation evaluation,
+        used by dz_dt_int (during ODE integration) for both auxiliaries and
+        stock derivatives, and by evaluate_auxiliaries (for post-simulation output).
+        
+        Args:
+            var: Name of the variable (auxiliary or stock)
+            params: Parameter dictionary with coefficients
+            vals: Dictionary of current variable values (stocks, constants, and already-computed auxiliaries)
+        
+        Returns:
+            float: Computed equation value
+        """
+        total = 0.0
+        for pred, coef in params[var].items():
+            if pred == 'Intercept':
+                total += coef
+            elif '*' in pred:
+                # Handle both " * " and "*" separators for robustness
+                if ' * ' in pred:
+                    v1, v2 = pred.split(' * ')
+                else:
+                    v1, v2 = [p.strip() for p in pred.split('*')]
+                total += coef * vals[v1] * vals[v2]
+            else:
+                total += coef * vals[pred]
+        return total
+
+    def _compute_all_auxiliaries(self, stock_vals, const_vals, params):
+        """
+        Compute all auxiliary values given stock and constant values.
+        
+        Args:
+            stock_vals: Array or list of stock values (in order of self.stocks)
+            const_vals: Array or list of constant values (in order of self.constants)
+            params: Parameter dictionary
+        
+        Returns:
+            dict: All variable values including computed auxiliaries
+        """
+        # Initialize with stocks and constants
+        vals = {var: 0.0 for var in self.variables}
+        for s, v in zip(self.stocks, stock_vals):
+            vals[s] = v
+        for c, v in zip(self.constants, const_vals):
+            vals[c] = v
+        
+        # Ensure auxiliaries are sorted by dependency order
+        if self.auxiliaries_sorted == []:
+            self.auxiliaries_sorted = self.sort_auxiliaries(params)
+        
+        # Compute auxiliaries in dependency order
+        for aux in self.auxiliaries_sorted:
+            vals[aux] = self._compute_equation_value(aux, params, vals)
+        
+        return vals
 
     def params_to_A_b(self, params, constants_values):
         """
@@ -719,26 +753,29 @@ class SDM:
         """ Evaluate the auxiliary variables at each time step.
         Input: original parameter dictionary with auxiliary terms, and the solution dataframe
         Output: dataframe with added auxiliary values at each time step
+        
+        Uses _compute_auxiliary_value as single source of truth for auxiliary computation.
         """
         if self.auxiliaries_sorted == []: # If not already sorted
             self.auxiliaries_sorted = self.sort_auxiliaries(params)
     
         df_sol_with_auxiliaries = df_sol.copy()
+        
+        # Initialize auxiliary columns
         for aux in self.auxiliaries_sorted:
-            df_sol_with_auxiliaries[aux] = np.nan # Initialize column with NaNs
-            for t in self.t_eval:
-                aux_value = 0
-                for origin in params[aux]:
-                    if origin == "Intercept":
-                        aux_value += params[aux][origin]
-                    else:
-                        if "*" in origin:  # Interaction term
-                            origin_1 = origin.split(" * ")[0]
-                            origin_2 = origin.split(" * ")[1]
-                            aux_value += params[aux][origin] * df_sol_with_auxiliaries.loc[t, origin_1] * df_sol_with_auxiliaries.loc[t, origin_2]
-                        else:  # Not an interaction term
-                            aux_value += params[aux][origin] * df_sol_with_auxiliaries.loc[t, origin]
-                df_sol_with_auxiliaries.loc[t, aux] = aux_value
+            df_sol_with_auxiliaries[aux] = np.nan
+        
+        # Compute auxiliaries at each time step
+        for t in self.t_eval:
+            # Build vals dict from current row
+            vals = {col: df_sol_with_auxiliaries.loc[t, col] 
+                    for col in df_sol_with_auxiliaries.columns 
+                    if col != 'Time' and col not in self.auxiliaries}
+            
+            # Compute each auxiliary in dependency order
+            for aux in self.auxiliaries_sorted:
+                vals[aux] = self._compute_equation_value(aux, params, vals)
+                df_sol_with_auxiliaries.loc[t, aux] = vals[aux]
 
         return df_sol_with_auxiliaries
 
