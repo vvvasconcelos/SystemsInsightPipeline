@@ -102,6 +102,10 @@ class Extract:
                                            s.df_adj_incl_interactions.columns[from1]] = value
             s.df_adj_incl_interactions.loc[s.df_adj_incl_interactions.index[to],
                                            s.df_adj_incl_interactions.columns[from2]] = value
+        
+        # Add custom equations to settings
+        s.equations = self.equations if hasattr(self, 'equations') else {}
+        s.equation_warnings = self.equation_warnings if hasattr(self, 'equation_warnings') else []
             
         self.s = s  # Save the settings
 
@@ -209,8 +213,14 @@ class Extract:
         df_e = pd.read_excel(self.file_path, sheet_name="Elements")
         df_c = pd.read_excel(self.file_path, sheet_name="Connections")
 
-        # Extract relevant columns
-        df_e = df_e[["Label", "Type", "Tags", "Description"]]   
+        # Extract relevant columns - include Equation if present
+        base_columns = ["Label", "Type", "Tags", "Description"]
+        if "Equation" in df_e.columns:
+            base_columns.append("Equation")
+            self.has_equations = True
+        else:
+            self.has_equations = False
+        df_e = df_e[[col for col in base_columns if col in df_e.columns]]
         df_c = df_c[["From", "Type", "To"]]
         
         # Extract variables from the Elements 
@@ -316,7 +326,60 @@ class Extract:
                     raise(Exception(f'Number of incoming links for (non-constant) variable {var} is {num_incoming_links}, should be at least one.'))
 
         self.check_loops(df_e, df_c)  # Check for stocks in loops and ratio of balancing loops
+        
+        # Parse custom equations if present
+        self.equations = {}
+        self.equation_warnings = []
+        if self.has_equations:
+            self._parse_equations(df_e)
 
+    def _parse_equations(self, df_e):
+        """
+        Parse custom equations from the Equation column.
+        
+        Validates equations against incoming links and prepares them for evaluation.
+        Uses # symbol for parameters (positive range) and supports np.FUNCTION syntax.
+        """
+        from systemdynamics.equations import EquationParser
+        
+        parser = EquationParser(self.variables)
+        
+        for idx, row in df_e.iterrows():
+            label = row['Label']
+            equation = row.get('Equation', None)
+            
+            if pd.isna(equation) or str(equation).strip() == '':
+                continue
+            
+            # Find cleaned variable name
+            var_name = self.original_to_cleaned_var.get(label, label)
+            
+            if var_name not in self.variables:
+                continue
+            
+            # Get incoming links from adjacency matrix
+            incoming_links = [
+                col for col in self.df_adj.columns 
+                if self.df_adj.loc[var_name, col] != 0
+            ]
+            
+            # Parse the equation
+            parsed = parser.parse_equation(var_name, str(equation), incoming_links)
+            
+            if parsed['is_valid']:
+                self.equations[var_name] = parsed
+                
+                # Print equation info
+                print(f"Custom equation for '{var_name}': {equation}")
+                print(f"  Variables used: {parsed['variables_used']}")
+                print(f"  Parameters (#): {parsed['n_parameters']}")
+                
+                # Collect and print warnings
+                for warning in parsed['validation_warnings']:
+                    warning_msg = f"  ⚠ {warning}"
+                    self.equation_warnings.append(f"[{var_name}] {warning}")
+                    print(warning_msg)
+                print()
 
     def extract_interactions_matrix(self):
         """Extract the interactions matrix from the 'Interactions' sheet in the Kumu Excel file."""

@@ -5,3 +5,4 @@ __email__ = "j.f.uleman@gmail.com"
 
 from .ltm import LoopsThatMatter
 from .optimizer import SDMOptimizer
+from .equations import EquationParser, EquationEvaluator

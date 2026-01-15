@@ -33,6 +33,21 @@ class SDM:
         self.auxiliaries_sorted = []  # To store the sorted auxiliaries based on dependencies
         np.random.seed(s.seed)  # Set seed for reproducibility
 
+        # Custom equations support
+        self.equations = getattr(s, 'equations', {})
+        self.equation_warnings = getattr(s, 'equation_warnings', [])
+        self._equation_evaluator = None
+        if self.equations:
+            from systemdynamics.equations import EquationEvaluator
+            # Use parameter_value_aux as the default range for custom equation parameters
+            self._equation_evaluator = EquationEvaluator(
+                self.equations, 
+                parameter_range=(0, s.parameter_value_aux)
+            )
+            # Print warnings if any
+            for warning in self.equation_warnings:
+                print(f"Warning: {warning}")
+
         self.num_pars_stocks = int((self.df_adj.loc[self.stocks, :] != 0).sum().sum())
         self.num_pars_auxiliaries = int((self.df_adj.loc[self.auxiliaries, :] != 0).sum().sum())
 
@@ -218,16 +233,31 @@ class SDM:
         used by dz_dt_int (during ODE integration) for both auxiliaries and
         stock derivatives, and by evaluate_auxiliaries (for post-simulation output).
         
+        If a custom equation is defined for the variable (from the Equation column
+        in the Kumu Excel file), that equation will be used instead of the default
+        linear combination.
+        
         Args:
             var: Name of the variable (auxiliary or stock)
-            params: Parameter dictionary with coefficients
+            params: Parameter dictionary with coefficients (also contains equation parameters)
             vals: Dictionary of current variable values (stocks, constants, and already-computed auxiliaries)
         
         Returns:
             float: Computed equation value
         """
+        # Check if this variable has a custom equation
+        if self._equation_evaluator and self._equation_evaluator.has_custom_equation(var):
+            # Get the sampled parameters for this equation from params[var] dict
+            eq_params_key = f'__eq_params_{var}__'
+            eq_params = params[var].get(eq_params_key, np.array([]))
+            return self._equation_evaluator.evaluate(var, vals, eq_params)
+        
+        # Default: linear combination based on adjacency matrix
         total = 0.0
         for pred, coef in params[var].items():
+            # Skip special equation parameter entries
+            if pred.startswith('__eq_params_'):
+                continue
             if pred == 'Intercept':
                 total += coef
             elif '*' in pred:
@@ -499,6 +529,14 @@ class SDM:
                                 if var in self.auxiliaries: # If the variable is an auxiliary
                                     params[var][var_2 + " * " + var_3] = self.interactions_matrix[i, j, k] * sample_pars_int_auxiliaries[par_int_count_auxiliaries]
                                     par_int_count_auxiliaries += 1   
+        
+        # Sample parameters for custom equations
+        if self._equation_evaluator:
+            for var in self.stocks_and_auxiliaries:
+                if self._equation_evaluator.has_custom_equation(var):
+                    eq_params = self._equation_evaluator.sample_equation_parameters(var)
+                    params[var][f'__eq_params_{var}__'] = eq_params
+        
         self.params = params
         return params
 
