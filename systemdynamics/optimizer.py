@@ -279,23 +279,35 @@ class SDMOptimizer:
             'optimization_result': result
         }
     
-    def _optimize_global(self, params, costs, variable_of_interest, bounds=None, threshold_effect=0.01, n_samples=50, maximize=True, bounds_min=0, bounds_max=10):
+    def _optimize_global(
+        self,
+        params,
+        costs,
+        variable_of_interest,
+        bounds=None,
+        threshold_effect=0.01,
+        n_samples=50,
+        maximize=True,
+        bounds_min=0,
+        bounds_max=10,
+    ):
         """Global optimization using SHGO with Sobol quasi-random sampling to find multiple near-optimal solutions.
-        
+
         Args:
-            n_samples (int): Number of SHGO samples for Sobol quasi-random exploration. 
+            n_samples (int): Number of SHGO samples for Sobol quasi-random exploration.
                             Sobol provides space-filling samples, more efficient than random sampling.
                             Note: With many variables (>10), even 50 samples can be slow.
                             For faster optimization, consider using method='local' instead.
         """
         n_interventions = len(self.sdm.intervention_variables)
-        
+
+        # Coerce costs once (robust for dot products and bounds)
+        costs_array = np.asarray(costs, dtype=float)
+
         # Set default bounds for all variables
         if bounds is None:
-            # Set individual bounds for each intervention based on budget constraint
             # Each intervention can individually use the full budget: intensity_i <= 1.0 / cost_i
-            # This allows the optimizer more flexibility while constraint ensures feasibility
-            costs_array = np.asarray(costs)
+            # (Constraint still enforces feasibility across all interventions together.)
             bounds = []
             for cost in costs_array:
                 if cost > 0:
@@ -303,58 +315,82 @@ class SDMOptimizer:
                     bounds.append((bounds_min, min(max_for_this_intervention, bounds_max)))
                 else:
                     bounds.append((bounds_min, bounds_max))
-        
+
         # Objective function for all variables
         def objective(intensities):
             try:
                 df_sol = self.run_SDM_with_intervention_intensities(intensities, params)
-                effect_size = df_sol.loc[self.sdm.t_eval[-1], variable_of_interest]
-                return -float(effect_size) if maximize else float(effect_size)
-            except:
+
+                # Robustly take the final simulated value (avoid float-index KeyErrors)
+                effect_size = df_sol[variable_of_interest].iloc[-1]
+
+                effect_size = float(effect_size)
+                return -effect_size if maximize else effect_size
+            except Exception:
+                # Penalize failures heavily so SHGO avoids invalid regions
                 return 1e6
-        
+
         # Constraint: total cost <= 1.0 (inequality allows for underspending)
-        constraints = {'type': 'ineq', 'fun': lambda i: 1.0 - np.dot(i, costs)}
-        
+        constraints = {"type": "ineq", "fun": lambda x: 1.0 - np.dot(x, costs_array)}
+
         # Run global optimization
-        result = shgo(objective, bounds, constraints=constraints, 
-                     n=n_samples, sampling_method='sobol', options={'maxtime': 30})
-        
+        result = shgo(
+            objective,
+            bounds,
+            constraints=constraints,
+            n=n_samples,
+            sampling_method="sobol",
+            options={"maxtime": 30},
+        )
+
         if not result.success:
             return {
-                'method': 'global',
-                'success': False, 
-                'message': 'Global optimization failed',
-                'optimization_result': result
+                "method": "global",
+                "success": False,
+                "message": "Global optimization failed",
+                "optimization_result": result,
             }
-        
+
         # Collect all near-optimal solutions
-        best_effect_size = -result.fun if maximize else result.fun
+        best_effect_size = (-result.fun) if maximize else (result.fun)
         equilibria = []
-        
+
+        # result.xl: local minimizers found; result.funl: objective values at those points
         for i_set, val in zip(result.xl, result.funl):
-            current_effect_size = -val if maximize else val
-            if (best_effect_size - current_effect_size) <= threshold_effect:
-                intervention_dict = {name: round(float(intensity), 4) 
-                                   for name, intensity in zip(self.sdm.intervention_variables, i_set)}
-                equilibria.append({
-                    'interventions': intervention_dict,
-                    'intensities': i_set,
-                    'effect_size': round(current_effect_size, 6),
-                    'total_cost': round(np.dot(i_set, costs), 4)
-                })
-        
+            current_effect_size = (-val) if maximize else (val)
+
+            # Correct near-optimal test for both maximize and minimize
+            if maximize:
+                near_opt = (best_effect_size - current_effect_size) <= threshold_effect
+            else:
+                near_opt = (current_effect_size - best_effect_size) <= threshold_effect
+
+            if near_opt:
+                intervention_dict = {
+                    name: round(float(intensity), 4)
+                    for name, intensity in zip(self.sdm.intervention_variables, i_set)
+                }
+                equilibria.append(
+                    {
+                        "interventions": intervention_dict,
+                        "intensities": i_set,
+                        "effect_size": round(float(current_effect_size), 6),
+                        "total_cost": round(float(np.dot(i_set, costs_array)), 4),
+                    }
+                )
+
         # Sort by effect_size (descending)
-        equilibria.sort(key=lambda x: x['effect_size'], reverse=True)
-        
+        equilibria.sort(key=lambda x: x["effect_size"], reverse=True)
+
         return {
-            'method': 'global',
-            'success': True,
-            'n_equilibria': len(equilibria),
-            'equilibria': equilibria,
-            'best_effect_size': best_effect_size,
-            'optimization_result': result
+            "method": "global",
+            "success": True,
+            "n_equilibria": len(equilibria),
+            "equilibria": equilibria,
+            "best_effect_size": float(best_effect_size),
+            "optimization_result": result,
         }
+
 
     def optimize_across_parameter_samples(self, costs, variable_of_interest=None, 
                                          bounds=None, initial_guess=None, method='global',
