@@ -94,7 +94,7 @@ class Extract:
         # Add the interactions to the adjacency matrix for the identification of feedback loops with interaction terms
         s.df_adj_incl_interactions = s.df_adj.copy()
         to_list, from1_list, from2_list = np.nonzero(s.interactions_matrix)
-        for i in range(int(np.abs(s.interactions_matrix).sum())):
+        for i in range(len(to_list)):  # Use length of nonzero indices, not sum of values
             to, from1, from2 = to_list[i], from1_list[i], from2_list[i]
             value = s.interactions_matrix[to, from1, from2]
             # Ensure that the interaction is nonzero in the adjacency matrix
@@ -373,6 +373,10 @@ class Extract:
                 print(f"Custom equation for '{var_name}': {equation}")
                 print(f"  Variables used: {parsed['variables_used']}")
                 print(f"  Parameters (#): {parsed['n_parameters']}")
+                if parsed.get('has_intervention', False):
+                    print(f"  Intervention ($): Yes - intervention applied within equation")
+                else:
+                    print(f"  Intervention ($): No - intervention will be added to result")
                 
                 # Collect and print warnings
                 for warning in parsed['validation_warnings']:
@@ -380,6 +384,12 @@ class Extract:
                     self.equation_warnings.append(f"[{var_name}] {warning}")
                     print(warning_msg)
                 print()
+            else:
+                # Equation is invalid - print error and raise exception
+                print(f"\n❌ INVALID equation for '{var_name}': {equation}")
+                for warning in parsed['validation_warnings']:
+                    print(f"   {warning}")
+                raise ValueError(f"Invalid equation for '{var_name}': {parsed['validation_warnings']}")
 
     def extract_interactions_matrix(self):
         """Extract the interactions matrix from the 'Interactions' sheet in the Kumu Excel file."""

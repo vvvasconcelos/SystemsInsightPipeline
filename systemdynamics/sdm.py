@@ -32,6 +32,9 @@ class SDM:
         self.intervention_strengths = s.intervention_strengths
         self.auxiliaries_sorted = []  # To store the sorted auxiliaries based on dependencies
         np.random.seed(s.seed)  # Set seed for reproducibility
+        
+        # Track current intervention intensities during simulation
+        self._current_intervention_intensities = {}  # var -> intensity
 
         # Custom equations support
         self.equations = getattr(s, 'equations', {})
@@ -129,6 +132,9 @@ class SDM:
                 constants_values = np.zeros(len(self.constants), dtype=np.float64)  # By default no intervention on a constant 
 
                 params = deepcopy(params_i)  # Copy the parameters to avoid overwriting the original parameters
+                
+                # Reset current intervention intensities
+                self._current_intervention_intensities = {}
 
                 if '+' not in var:  # Single factor intervention
                     if var in self.stocks:
@@ -136,7 +142,11 @@ class SDM:
                     elif var in self.constants:
                         constants_values[self.constants.index(var)] += self.intervention_strengths[var]
                     else:
-                        params[var]["Intercept"] = self.intervention_strengths[var]
+                        # Track intervention intensity for custom equations
+                        self._current_intervention_intensities[var] = self.intervention_strengths[var]
+                        # Only set intercept if no custom equation (custom equation handles $ itself)
+                        if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var)):
+                            params[var]["Intercept"] = self.intervention_strengths[var]
 
                 else:  # Double factor intervention
                     var_1, var_2 = var.split('+')
@@ -145,14 +155,18 @@ class SDM:
                     elif var_1 in self.constants: 
                         constants_values[self.constants.index(var_1)] += (1/2) * self.intervention_strengths[var_1]
                     else: 
-                        params[var_1]["Intercept"] = (1/2) * self.intervention_strengths[var_1]
+                        self._current_intervention_intensities[var_1] = (1/2) * self.intervention_strengths[var_1]
+                        if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var_1)):
+                            params[var_1]["Intercept"] = (1/2) * self.intervention_strengths[var_1]
 
                     if var_2 in self.stocks:
                         x0[self.stocks.index(var_2)] += (1/2) * self.intervention_strengths[var_2]
                     elif var_2 in self.constants: 
                         constants_values[self.constants.index(var_2)] += (1/2) * self.intervention_strengths[var_2]
                     else:
-                        params[var_2]["Intercept"] = (1/2) * self.intervention_strengths[var_2]
+                        self._current_intervention_intensities[var_2] = (1/2) * self.intervention_strengths[var_2]
+                        if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var_2)):
+                            params[var_2]["Intercept"] = (1/2) * self.intervention_strengths[var_2]
 
                 if self.interaction_terms:
                     #K = self.params_to_K(params)
@@ -250,7 +264,9 @@ class SDM:
             # Get the sampled parameters for this equation from params[var] dict
             eq_params_key = f'__eq_params_{var}__'
             eq_params = params[var].get(eq_params_key, np.array([]))
-            return self._equation_evaluator.evaluate(var, vals, eq_params)
+            # Get intervention intensity for this variable (default 0.0 if not intervened)
+            intervention = self._current_intervention_intensities.get(var, 0.0)
+            return self._equation_evaluator.evaluate(var, vals, eq_params, intervention)
         
         # Default: linear combination based on adjacency matrix
         total = 0.0
@@ -645,30 +661,74 @@ class SDM:
     def run_SA(self, outcome_var, int_var, cut_off_SA_importance=0.1, n_bootstraps=200):
         """ Run sensitivity analysis for the model parameters, either for a specific intervention (int_var) or over all interventions,
             and compute bootstrap confidence intervals for correlation coefficients.
+            
+        Also includes custom equation parameters if equations are defined.
         """  
         if int_var is None:
             loop_over = self.intervention_variables
         else:
             loop_over = [int_var]
 
-        param_names = self.flatten([[source + "->" + target for source in self.param_samples[self.intervention_variables[0]][target]]
-                                    for target in self.param_samples[self.intervention_variables[0]]])
+        # Build parameter names list, excluding special equation parameter keys
+        param_names = []
+        for target in self.param_samples[self.intervention_variables[0]]:
+            for source in self.param_samples[self.intervention_variables[0]][target]:
+                # Skip equation parameter arrays (they're handled separately)
+                if source.startswith('__eq_params_'):
+                    continue
+                param_names.append(source + "->" + target)
+        
+        # Add custom equation parameter names if they exist
+        # Named as p1->Variable, p2->Variable, etc. to follow the same pattern as regular params
+        eq_param_names = []
+        if self._equation_evaluator:
+            for var in self.stocks_and_auxiliaries:
+                if self._equation_evaluator.has_custom_equation(var):
+                    n_params = self.equations[var]['n_parameters']
+                    for p_idx in range(n_params):
+                        eq_param_names.append(f"p{p_idx+1}->{var}")
+
+        all_param_names = param_names + eq_param_names
 
         for i_v in loop_over:
             i = self.intervention_variables.index(i_v)
             for n in range(self.N):
-                params_curr = self.flatten([[self.param_samples[i_v][target][source][n]
-                                            for source in self.param_samples[i_v][target]]
-                                            for target in self.param_samples[i_v]])
+                # Collect regular parameters (scalars)
+                params_curr = []
+                for target in self.param_samples[i_v]:
+                    for source in self.param_samples[i_v][target]:
+                        if source.startswith('__eq_params_'):
+                            continue
+                        val = self.param_samples[i_v][target][source][n]
+                        # Ensure it's a scalar
+                        if hasattr(val, '__iter__') and not isinstance(val, str):
+                            params_curr.extend(val)
+                        else:
+                            params_curr.append(float(val))
+                
+                # Collect equation parameters (arrays stored per sample)
+                eq_params_curr = []
+                if self._equation_evaluator:
+                    for var in self.stocks_and_auxiliaries:
+                        eq_key = f'__eq_params_{var}__'
+                        if var in self.param_samples[i_v] and eq_key in self.param_samples[i_v][var]:
+                            # param_samples[i_v][var][eq_key] is a list of arrays, one per sample
+                            eq_arr = self.param_samples[i_v][var][eq_key][n]
+                            if hasattr(eq_arr, '__iter__'):
+                                eq_params_curr.extend([float(x) for x in eq_arr])
+                            else:
+                                eq_params_curr.append(float(eq_arr))
+
+                all_params = params_curr + eq_params_curr
 
                 if outcome_var is None:
                     eff_size = self.df_sol_per_sample[n][i].loc[self.df_sol_per_sample[n][i].Time == self.t_eval[-1], :].abs().mean().mean()
-                    new_row = np.array(params_curr + [float(eff_size)])
+                    new_row = np.array(all_params + [float(eff_size)])
                 else:
                     eff_size = abs(self.df_sol_per_sample[n][i].loc[self.df_sol_per_sample[n][i].Time == self.t_eval[-1], outcome_var])
-                    new_row = np.array(params_curr + [float(eff_size.iloc[0])])
+                    new_row = np.array(all_params + [float(eff_size.iloc[0])])
 
-                df_SA_new = pd.DataFrame(new_row, index=param_names + ["Effect"]).T
+                df_SA_new = pd.DataFrame(new_row, index=all_param_names + ["Effect"]).T
                 df_SA_new['intervention_variable'] = i_v
 
                 if n == 0 and i_v == loop_over[0]:
@@ -679,7 +739,10 @@ class SDM:
         # Compute correlation, p-value, and bootstrapped confidence interval
         results = []
         for col in df_SA.columns:
-            if col == "Effect" or col.split("->")[0] == "Intercept" or col == "intervention_variable":
+            if col == "Effect" or col == "intervention_variable":
+                continue
+            # Skip Intercept parameters
+            if "->" in col and col.split("->")[0] == "Intercept":
                 continue
 
             # Spearman correlation and p-value
