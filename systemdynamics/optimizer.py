@@ -8,7 +8,7 @@ including local and global optimization methods.
 import warnings
 import numpy as np
 import pandas as pd
-from scipy.optimize import shgo, differential_evolution
+from scipy.optimize import shgo
 import scipy
 from copy import deepcopy
 from tqdm import tqdm
@@ -233,12 +233,10 @@ class SDMOptimizer:
         
         if method == 'local':
             return self._optimize_local(params, costs, variable_of_interest, bounds, initial_guess, maximize)
-        elif method == 'global_de':
-            return self._optimize_global_de(params, costs, variable_of_interest, bounds, threshold_effect, n_samples, maximize)
-        elif method == 'global' or method == 'global_shgo':
-            return self._optimize_global_shgo(params, costs, variable_of_interest, bounds, threshold_effect, n_samples, maximize)
+        elif method == 'global':
+            return self._optimize_global(params, costs, variable_of_interest, bounds, threshold_effect, n_samples, maximize)
         else:
-            raise ValueError(f"Method must be 'local', 'global', 'global_de', or 'global_shgo', got '{method}'")
+            raise ValueError(f"Method must be 'local' or 'global', got '{method}'")
     
     
     def _optimize_local(self, params, costs, variable_of_interest, bounds=None, initial_guess=None, maximize=True):
@@ -281,73 +279,46 @@ class SDMOptimizer:
             'optimization_result': result
         }
     
-    def _optimize_global_de(self, params, costs, variable_of_interest, bounds=None, threshold_effect=0.01, n_samples=50, maximize=True, bounds_min=0, bounds_max=10):
-        """Global optimization using differential evolution with simplex folding.
-        
-        The budget constraint is: sum(c_i * i_i) <= 1
-        
-        We reparametrize using y_i = c_i * i_i (cost-weighted intensities).
-        The constraint becomes: sum(y_i) <= 1, which is the standard simplex.
-        
-        Simplex folding (sorting-based):
-        - Sample u from [0,1]^(n-1)
-        - Sort u to get order statistics: u_(1) <= u_(2) <= ... <= u_(n-1)
-        - Compute spacings: y = [u_(1), u_(2)-u_(1), ..., 1-u_(n-1)]
-        
-        This is equivalent to "folding" the hypercube onto the simplex.
-        In 2D (3 interventions): fold the unit square along the diagonal x=y.
-        
-        Mathematical fact: The spacings of uniform order statistics are 
-        uniformly distributed on the simplex.
+    def _optimize_global(self, params, costs, variable_of_interest, bounds=None, threshold_effect=0.01, n_samples=50, maximize=True, bounds_min=0, bounds_max=10):
+        """Global optimization using SHGO with Sobol quasi-random sampling to find multiple near-optimal solutions.
         
         Args:
-            n_samples (int): Population size multiplier for differential evolution.
+            n_samples (int): Number of SHGO samples for Sobol quasi-random exploration. 
+                            Sobol provides space-filling samples, more efficient than random sampling.
+                            Note: With many variables (>10), even 50 samples can be slow.
+                            For faster optimization, consider using method='local' instead.
         """
         n_interventions = len(self.sdm.intervention_variables)
-        costs_array = np.asarray(costs, dtype=np.float64)
         
-        # Bounds for (n-1) values in [0, 1] - we need n-1 to generate n simplex coords
-        simplex_bounds = [(0.0, 1.0) for _ in range(n_interventions - 1)]
+        # Set default bounds for all variables
+        if bounds is None:
+            # Set individual bounds for each intervention based on budget constraint
+            # Each intervention can individually use the full budget: intensity_i <= 1.0 / cost_i
+            # This allows the optimizer more flexibility while constraint ensures feasibility
+            costs_array = np.asarray(costs)
+            bounds = []
+            for cost in costs_array:
+                if cost > 0:
+                    max_for_this_intervention = 1.0 / cost
+                    bounds.append((bounds_min, min(max_for_this_intervention, bounds_max)))
+                else:
+                    bounds.append((bounds_min, bounds_max))
         
-        def fold_to_simplex(u):
-            """Fold a point in [0,1]^(n-1) to the n-simplex using sorting.
-            
-            Given uniform u in [0,1]^(n-1), returns y on the n-simplex (sum(y) = 1).
-            This is the standard transformation for uniform simplex sampling.
-            """
-            u_sorted = np.sort(u)
-            # Compute differences: y_i = u_{(i)} - u_{(i-1)} where u_{(0)}=0, u_{(n-1)}=1
-            # This produces n values from n-1 sorted values
-            y = np.diff(np.concatenate([[0], u_sorted, [1]]))
-            return y
-        
-        def y_to_intensities(y):
-            """Convert cost-weighted values y to intensities.
-            
-            y_i = c_i * i_i, so i_i = y_i / c_i
-            """
-            # Avoid division by zero
-            intensities = np.where(costs_array > 1e-10, y / costs_array, 0.0)
-            return intensities
-        
-        def objective(u):
-            """Objective function: fold u to simplex, convert to intensities, evaluate."""
+        # Objective function for all variables
+        def objective(intensities):
             try:
-                y = fold_to_simplex(u)
-                intensities = y_to_intensities(y)
                 df_sol = self.run_SDM_with_intervention_intensities(intensities, params)
                 effect_size = df_sol.loc[self.sdm.t_eval[-1], variable_of_interest]
                 return -float(effect_size) if maximize else float(effect_size)
             except:
                 return 1e6
         
-        # Run differential evolution
-        # DE will explore [0,1]^(n-1) and we fold each point to the n-simplex
-        popsize = max(5, n_samples // n_interventions) if n_samples else 5
-        result = differential_evolution(objective, simplex_bounds, 
-                                        popsize=popsize, maxiter=100, 
-                                        tol=0.01, atol=0.01, seed=None,
-                                        polish=True)
+        # Constraint: total cost <= 1.0 (inequality allows for underspending)
+        constraints = {'type': 'ineq', 'fun': lambda i: 1.0 - np.dot(i, costs)}
+        
+        # Run global optimization
+        result = shgo(objective, bounds, constraints=constraints, 
+                     n=n_samples, sampling_method='sobol', options={'maxtime': 30})
         
         if not result.success:
             return {
@@ -357,110 +328,29 @@ class SDMOptimizer:
                 'optimization_result': result
             }
         
-        # Get the optimal solution
+        # Collect all near-optimal solutions
         best_effect_size = -result.fun if maximize else result.fun
-        best_y = fold_to_simplex(result.x)
-        best_intensities = y_to_intensities(best_y)
+        equilibria = []
         
-        intervention_dict = {name: round(float(intensity), 4) 
-                           for name, intensity in zip(self.sdm.intervention_variables, best_intensities)}
+        for i_set, val in zip(result.xl, result.funl):
+            current_effect_size = -val if maximize else val
+            if (best_effect_size - current_effect_size) <= threshold_effect:
+                intervention_dict = {name: round(float(intensity), 4) 
+                                   for name, intensity in zip(self.sdm.intervention_variables, i_set)}
+                equilibria.append({
+                    'interventions': intervention_dict,
+                    'intensities': i_set,
+                    'effect_size': round(current_effect_size, 6),
+                    'total_cost': round(np.dot(i_set, costs), 4)
+                })
         
-        equilibria = [{
-            'interventions': intervention_dict,
-            'intensities': best_intensities,
-            'effect_size': round(best_effect_size, 6),
-            'total_cost': round(np.dot(best_intensities, costs_array), 4)
-        }]
+        # Sort by effect_size (descending)
+        equilibria.sort(key=lambda x: x['effect_size'], reverse=True)
         
         return {
-            'method': 'global_de',
+            'method': 'global',
             'success': True,
-            'n_equilibria': 1,  # DE returns single optimum
-            'equilibria': equilibria,
-            'best_effect_size': best_effect_size,
-            'optimization_result': result
-        }
-
-    def _optimize_global_shgo(self, params, costs, variable_of_interest, bounds=None, threshold_effect=0.01, n_samples=50, maximize=True, bounds_min=0, bounds_max=10):
-        """Global optimization using SHGO with simplex folding.
-        
-        Same simplex folding as _optimize_global_de, but uses SHGO (Simplicial Homology 
-        Global Optimization) instead of differential evolution.
-        
-        SHGO can find multiple local minima and provides more exhaustive search,
-        but may be slower and can have numerical issues with Delaunay triangulation.
-        
-        Args:
-            n_samples (int): Number of Sobol sampling points for SHGO.
-        """
-        n_interventions = len(self.sdm.intervention_variables)
-        costs_array = np.asarray(costs, dtype=np.float64)
-        
-        # Bounds for (n-1) values in [0, 1]
-        simplex_bounds = [(0.0, 1.0) for _ in range(n_interventions - 1)]
-        
-        def fold_to_simplex(u):
-            """Fold a point in [0,1]^(n-1) to the n-simplex using sorting."""
-            u_sorted = np.sort(u)
-            y = np.diff(np.concatenate([[0], u_sorted, [1]]))
-            return y
-        
-        def y_to_intensities(y):
-            """Convert cost-weighted values y to intensities."""
-            intensities = np.where(costs_array > 1e-10, y / costs_array, 0.0)
-            return intensities
-        
-        def objective(u):
-            """Objective function: fold u to simplex, convert to intensities, evaluate."""
-            try:
-                y = fold_to_simplex(u)
-                intensities = y_to_intensities(y)
-                df_sol = self.run_SDM_with_intervention_intensities(intensities, params)
-                effect_size = df_sol.loc[self.sdm.t_eval[-1], variable_of_interest]
-                return -float(effect_size) if maximize else float(effect_size)
-            except:
-                return 1e6
-        
-        # Run SHGO with Sobol sampling
-        try:
-            result = shgo(objective, simplex_bounds, n=n_samples, 
-                         sampling_method='sobol', options={'ftol': 1e-4})
-        except Exception as e:
-            # SHGO can fail with Qhull errors - fall back to result with no success
-            return {
-                'method': 'global_shgo',
-                'success': False,
-                'message': f'SHGO failed: {str(e)}',
-                'optimization_result': None
-            }
-        
-        if not result.success:
-            return {
-                'method': 'global_shgo',
-                'success': False, 
-                'message': 'SHGO optimization failed',
-                'optimization_result': result
-            }
-        
-        # Get the optimal solution
-        best_effect_size = -result.fun if maximize else result.fun
-        best_y = fold_to_simplex(result.x)
-        best_intensities = y_to_intensities(best_y)
-        
-        intervention_dict = {name: round(float(intensity), 4) 
-                           for name, intensity in zip(self.sdm.intervention_variables, best_intensities)}
-        
-        equilibria = [{
-            'interventions': intervention_dict,
-            'intensities': best_intensities,
-            'effect_size': round(best_effect_size, 6),
-            'total_cost': round(np.dot(best_intensities, costs_array), 4)
-        }]
-        
-        return {
-            'method': 'global_shgo',
-            'success': True,
-            'n_equilibria': 1,
+            'n_equilibria': len(equilibria),
             'equilibria': equilibria,
             'best_effect_size': best_effect_size,
             'optimization_result': result
