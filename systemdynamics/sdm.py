@@ -117,28 +117,37 @@ class SDM:
 
     def run_simulations(self, progress_callback=None):
         """ Run the simulations for N iterations for all the specified interventions
-        """
+        (PATCHED: remove link parameters for variables with custom equations as early as possible) """
         df_sol_per_sample = []  # List for storing the solution dataframes
-        param_samples = {var : {} for var in self.intervention_variables}  # Dictionary for storing the parameters across samples
+        param_samples = {var: {} for var in self.intervention_variables}  # Dictionary for storing the parameters across samples
 
         for num in tqdm(range(self.N), desc="Running Simulations"):  # Iterate over the number of samples
             df_sol = []
 
             params_i = self.sample_model_parameters()  # Sample model parameters
 
+            # PATCH: Remove link parameters for variables with custom equations IMMEDIATELY after sampling
+            if self._equation_evaluator:
+                for var in params_i:
+                    if self._equation_evaluator.has_custom_equation(var):
+                        eq_keys = [k for k in params_i[var] if k.startswith('__eq_params_') or k == 'Intercept']
+                        params_i[var] = {k: params_i[var][k] for k in eq_keys}
+
+            params_filtered = deepcopy(params_i)
+
             for i, var in enumerate(self.intervention_variables):
                 # Set the initial condition for the stocks to zero
                 x0 = np.zeros(len(self.stocks), dtype=np.float64)  # By default no intervention on a stock or constant
-                constants_values = np.zeros(len(self.constants), dtype=np.float64)  # By default no intervention on a constant 
+                constants_values = np.zeros(len(self.constants), dtype=np.float64)  # By default no intervention on a constant
 
-                params = deepcopy(params_i)  # Copy the parameters to avoid overwriting the original parameters
-                
+                params = deepcopy(params_filtered)  # Use filtered parameters
+
                 # Reset current intervention intensities
                 self._current_intervention_intensities = {}
 
                 if '+' not in var:  # Single factor intervention
                     if var in self.stocks:
-                        x0[self.stocks.index(var)] += self.intervention_strengths[var] 
+                        x0[self.stocks.index(var)] += self.intervention_strengths[var]
                     elif var in self.constants:
                         constants_values[self.constants.index(var)] += self.intervention_strengths[var]
                     else:
@@ -150,18 +159,18 @@ class SDM:
 
                 else:  # Double factor intervention
                     var_1, var_2 = var.split('+')
-                    if var_1 in self.stocks: 
+                    if var_1 in self.stocks:
                         x0[self.stocks.index(var_1)] += (1/2) * self.intervention_strengths[var_1]
-                    elif var_1 in self.constants: 
+                    elif var_1 in self.constants:
                         constants_values[self.constants.index(var_1)] += (1/2) * self.intervention_strengths[var_1]
-                    else: 
+                    else:
                         self._current_intervention_intensities[var_1] = (1/2) * self.intervention_strengths[var_1]
                         if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var_1)):
                             params[var_1]["Intercept"] = (1/2) * self.intervention_strengths[var_1]
 
                     if var_2 in self.stocks:
                         x0[self.stocks.index(var_2)] += (1/2) * self.intervention_strengths[var_2]
-                    elif var_2 in self.constants: 
+                    elif var_2 in self.constants:
                         constants_values[self.constants.index(var_2)] += (1/2) * self.intervention_strengths[var_2]
                     else:
                         self._current_intervention_intensities[var_2] = (1/2) * self.intervention_strengths[var_2]
@@ -172,15 +181,15 @@ class SDM:
                     #K = self.params_to_K(params)
                     A = None
                     b = None
-                else: # Get the system matrices A and b
+                else:  # Get the system matrices A and b
                     A, b = self.params_to_A_b(params, constants_values)
 
                 df_sol_per_intervention = self.run_SDM(x0, constants_values, A, b, params)
                 df_sol += [df_sol_per_intervention]
 
                 # Store the model parameters
-                if num == 0: 
-                    param_samples[var] = {target : {source : [params[target][source]] for source in params[target]} for target in params}
+                if num == 0:
+                    param_samples[var] = {target: {source: [params[target][source]] for source in params[target]} for target in params}
                 else:
                     for target in params:
                         for source in params[target]:
@@ -191,7 +200,7 @@ class SDM:
             # If a progress callback is provided, update progress (for Streamlit app)
             # if progress_callback:
             #     progress_callback(num + 1, self.N)
-    
+
         self.df_sol_per_sample = df_sol_per_sample
         self.param_samples = param_samples
         return df_sol_per_sample, param_samples
@@ -411,14 +420,25 @@ class SDM:
     def sort_auxiliaries(self, params):
         """
         """
-        # First sort the auxiliaries based on mutual dependencies
+        # Sort auxiliaries by dependencies, including custom equation references
         auxiliaries_sorted = []
-        deps = {a: [d for d in params.get(a, {}) if d in self.auxiliaries] for a in self.auxiliaries}
+        deps = {}
+        for a in self.auxiliaries:
+            # Start with incoming links from params
+            dep_vars = set([d for d in params.get(a, {}) if d in self.auxiliaries])
+            # If custom equation, add all referenced variables that are auxiliaries
+            if self._equation_evaluator and self._equation_evaluator.has_custom_equation(a):
+                eq_info = self._equation_evaluator.get_equation_info(a)
+                dep_vars |= set([v for v in eq_info.get('variables_used', set()) if v in self.auxiliaries])
+            deps[a] = list(dep_vars)
         warning_count = 0
         while deps:
             ready = [a for a, ds in deps.items() if not ds]
+            if not ready:
+                raise ValueError("Warning: Possible circular dependency among auxiliaries. Check model structure.")
             auxiliaries_sorted.extend(ready)
-            for r in ready: deps.pop(r)
+            for r in ready:
+                deps.pop(r)
             for ds in deps.values():
                 ds[:] = [d for d in ds if d not in ready]
             warning_count += 1
@@ -509,21 +529,39 @@ class SDM:
             if var in self.stocks_and_auxiliaries:
                 params[var]["Intercept"] = 0
 
+            # If this variable has a custom equation, add custom equation parameters, but also ensure all incoming links are present for dependency sorting
+            if self._equation_evaluator and self._equation_evaluator.has_custom_equation(var):
+                eq_params = self._equation_evaluator.sample_equation_parameters(var)
+                params[var][f'__eq_params_{var}__'] = eq_params
+                # Reintroduce all incoming links from adjacency matrix (set to 0 if not sampled)
+                incoming_links = [var_2 for var_2 in self.variables if self.df_adj.loc[var, var_2] != 0]
+                for var_2 in incoming_links:
+                    if var_2 not in params[var]:
+                        params[var][var_2] = 0.0
+                # Check for discrepancy between incoming links and custom equation variables
+                eq_vars = set(self.equations[var]['variables_used']) if var in self.equations else set()
+                incoming_set = set(incoming_links)
+                if eq_vars:
+                    missing_in_eq = incoming_set - eq_vars
+                    extra_in_eq = eq_vars - incoming_set
+                    if missing_in_eq or extra_in_eq:
+                        warnings.warn(f"Custom equation for '{var}': Incoming links not used in equation: {missing_in_eq if missing_in_eq else 'None'}; Variables used in equation not present as incoming links: {extra_in_eq if extra_in_eq else 'None'}")
+
             # Pairwise interactions
             for j, var_2 in enumerate(self.variables):
                 if self.df_adj.loc[var, var_2] != 0:
                     if self.df_adj.loc[var, var_2] == -999:
                         if var in self.stocks:  # If the variable is a stock
-                            params[var][var_2] = (sample_pars_stocks[par_count_stocks] * 2) - self.parameter_value_stocks  # Uniform[-self.max_parameter_value, self.max_parameter_value]
+                            params[var][var_2] = (sample_pars_stocks[par_count_stocks] * 2) - self.parameter_value_stocks
                             par_count_stocks += 1
                         else:  # If the variable is an auxiliary
-                            params[var][var_2] = (sample_pars_auxiliaries[par_count_auxiliaries] * 2) - self.parameter_value_aux  # Uniform[-self.max_parameter_value_aux, self.max_parameter_value_aux]
+                            params[var][var_2] = (sample_pars_auxiliaries[par_count_auxiliaries] * 2) - self.parameter_value_aux
                             par_count_auxiliaries += 1
-                    else:   
-                        if var in self.stocks:  # If the variable is a stock
+                    else:
+                        if var in self.stocks:
                             params[var][var_2] = self.df_adj.loc[var, var_2] * sample_pars_stocks[par_count_stocks]
                             par_count_stocks += 1
-                        else:  # If the variable is an auxiliary
+                        else:
                             params[var][var_2] = self.df_adj.loc[var, var_2] * sample_pars_auxiliaries[par_count_auxiliaries]
                             par_count_auxiliaries += 1
 
@@ -532,26 +570,26 @@ class SDM:
                     for k, var_3 in enumerate(self.variables):
                         if self.interactions_matrix[i, j, k] != 0:
                             if self.df_adj.loc[var, var_2] == -999:
-                                if var in self.stocks:  # If the variable is a stock
-                                    params[var][var_2 + " * " + var_3] = (sample_pars_int_stocks[par_int_count_stocks] * 2) - self.parameter_value_stocks  # Uniform[-self.max_parameter_value, self.max_parameter_value]
+                                if var in self.stocks:
+                                    params[var][var_2 + " * " + var_3] = (sample_pars_int_stocks[par_int_count_stocks] * 2) - self.parameter_value_stocks
                                     par_int_count_stocks += 1
-                                elif var in self.auxiliaries:  # If the variable is an auxiliary
+                                elif var in self.auxiliaries:
                                     params[var][var_2 + " * " + var_3] = (sample_pars_int_auxiliaries[par_int_count_auxiliaries] * 2) - self.parameter_value_aux
                                     par_int_count_auxiliaries += 1
-                            else:   
-                                if var in self.stocks: # If the variable is a stock
+                            else:
+                                if var in self.stocks:
                                     params[var][var_2 + " * " + var_3] = self.interactions_matrix[i, j, k] * sample_pars_int_stocks[par_int_count_stocks]
                                     par_int_count_stocks += 1
-                                if var in self.auxiliaries: # If the variable is an auxiliary
+                                if var in self.auxiliaries:
                                     params[var][var_2 + " * " + var_3] = self.interactions_matrix[i, j, k] * sample_pars_int_auxiliaries[par_int_count_auxiliaries]
-                                    par_int_count_auxiliaries += 1   
+                                    par_int_count_auxiliaries += 1 
         
         # Sample parameters for custom equations
-        if self._equation_evaluator:
-            for var in self.stocks_and_auxiliaries:
-                if self._equation_evaluator.has_custom_equation(var):
-                    eq_params = self._equation_evaluator.sample_equation_parameters(var)
-                    params[var][f'__eq_params_{var}__'] = eq_params
+        #if self._equation_evaluator:
+        #    for var in self.stocks_and_auxiliaries:
+        #        if self._equation_evaluator.has_custom_equation(var):
+        #            eq_params = self._equation_evaluator.sample_equation_parameters(var)
+        #            params[var][f'__eq_params_{var}__'] = eq_params
         
         self.params = params
         return params
@@ -706,18 +744,23 @@ class SDM:
                         else:
                             params_curr.append(float(val))
                 
-                # Collect equation parameters (arrays stored per sample)
+                # Collect equation parameters (dicts stored per sample)
                 eq_params_curr = []
                 if self._equation_evaluator:
                     for var in self.stocks_and_auxiliaries:
                         eq_key = f'__eq_params_{var}__'
                         if var in self.param_samples[i_v] and eq_key in self.param_samples[i_v][var]:
-                            # param_samples[i_v][var][eq_key] is a list of arrays, one per sample
-                            eq_arr = self.param_samples[i_v][var][eq_key][n]
-                            if hasattr(eq_arr, '__iter__'):
-                                eq_params_curr.extend([float(x) for x in eq_arr])
+                            eq_item = self.param_samples[i_v][var][eq_key][n]
+                            # If dict (e.g., {'#1': val1, '#2': val2}), flatten in key order
+                            if isinstance(eq_item, dict):
+                                # Sort keys by integer in '#N'
+                                for k in sorted(eq_item.keys(), key=lambda x: int(x.strip('#'))):
+                                    eq_params_curr.append(float(eq_item[k]))
+                            # If array/list, flatten as before
+                            elif hasattr(eq_item, '__iter__') and not isinstance(eq_item, str):
+                                eq_params_curr.extend([float(x) for x in eq_item])
                             else:
-                                eq_params_curr.append(float(eq_arr))
+                                eq_params_curr.append(float(eq_item))
 
                 all_params = params_curr + eq_params_curr
 

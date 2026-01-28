@@ -277,23 +277,19 @@ class EquationParser:
         # e.g., if equation uses #1, #3, #7, map to params[0], params[1], params[2]
         param_index_map = {orig_idx: new_idx for new_idx, orig_idx in enumerate(sorted(param_indices))}
         
-        # Replace parameters: #N -> params[mapped_index]
-        # First replace numbered parameters (reverse order to handle #10 before #1)
+        # Replace parameters: #N -> params['#N'] (reverse order to handle #10 before #1)
         for idx in sorted(param_indices, reverse=True):
-            mapped_idx = param_index_map[idx]
-            compiled = re.sub(rf'#\b{idx}\b', f'params[{mapped_idx}]', compiled)
-        
-        # Replace bare # with sequential params
-        param_counter = [0]  # Use list to allow modification in closure
+            compiled = re.sub(rf'#\b{idx}\b', f"params['#{idx}']", compiled)
+
+        # Replace bare # with sequential params (params['#1'], params['#2'], ...)
+        param_counter = [1]  # Start at 1 for #1
         def replace_bare_param(match):
             if match.group(1) == '':
-                result = f'params[{param_counter[0]}]'
+                result = f"params['#{param_counter[0]}']"
                 param_counter[0] += 1
                 return result
             return match.group(0)
-        
-        # Only replace bare # that weren't already handled
-        compiled = re.sub(r'#(?!\d)(?!\[)', lambda m: f'params[{param_counter[0]}]', compiled, count=0)
+        compiled = re.sub(r'#(?!\d)(?!\[)', replace_bare_param, compiled)
         
         return compiled
 
@@ -302,6 +298,12 @@ class EquationEvaluator:
     """
     Evaluates custom equations during simulation.
     """
+
+    def get_equation_info(self, var_name):
+        """
+        Return the parsed equation info dict for the given variable name.
+        """
+        return self.equations.get(var_name, {})
     
     def __init__(self, equations: Dict[str, Dict], parameter_range: Tuple[float, float] = (0, 1)):
         """
@@ -319,31 +321,43 @@ class EquationEvaluator:
             'sigmoid': lambda x: 1 / (1 + np.exp(-x)),
         }
     
-    def sample_equation_parameters(self, var_name: str) -> np.ndarray:
-        """
-        Sample parameters for a variable's equation.
-        
-        Args:
-            var_name: Name of the variable
-            
-        Returns:
-            Array of sampled parameter values (all positive)
-        """
+#    def sample_equation_parameters(self, var_name: str) -> np.ndarray:
+#        """
+#        Sample parameters for a variable's equation.
+#        
+#        Args:
+#            var_name: Name of the variable
+#            
+#        Returns:
+#            Array of sampled parameter values (all positive)
+#        """
+#        if var_name not in self.equations:
+#            return np.array([])
+#        
+#        eq_info = self.equations[var_name]
+#        n_params = eq_info['n_parameters']
+#        
+#        if n_params == 0:
+#            return np.array([])
+#        
+#        # Sample from uniform distribution in positive range
+#        return np.random.uniform(
+#            self.parameter_range[0], 
+#            self.parameter_range[1], 
+#            size=n_params
+#        )
+
+    def sample_equation_parameters(self, var_name: str) -> dict:
         if var_name not in self.equations:
-            return np.array([])
-        
+            return {}
         eq_info = self.equations[var_name]
-        n_params = eq_info['n_parameters']
-        
+        param_indices = eq_info['parameter_indices']
+        param_labels = [f'#{idx}' for idx in param_indices]
+        n_params = len(param_labels)
         if n_params == 0:
-            return np.array([])
-        
-        # Sample from uniform distribution in positive range
-        return np.random.uniform(
-            self.parameter_range[0], 
-            self.parameter_range[1], 
-            size=n_params
-        )
+            return {}
+        sampled = np.random.uniform(self.parameter_range[0], self.parameter_range[1], size=n_params)
+        return {label: val for label, val in zip(param_labels, sampled)}
     
     def evaluate(self, var_name: str, vals: Dict[str, float], params: np.ndarray, 
                  intervention: float = 0.0) -> float:

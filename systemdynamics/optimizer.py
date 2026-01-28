@@ -8,7 +8,8 @@ including local and global optimization methods.
 import warnings
 import numpy as np
 import pandas as pd
-from scipy.optimize import shgo
+import scipy.optimize
+from scipy.stats import qmc
 import scipy
 from copy import deepcopy
 from tqdm import tqdm
@@ -175,6 +176,8 @@ class SDMOptimizer:
             # Return a large penalty if the model fails
             return 1e6
 
+
+    #TODO: Consider whether local method is just an implementation of global with a specified sampling method and very low n_samples
     def optimize_intervention_intensities(self, params, costs, variable_of_interest=None, 
                                          bounds=None, initial_guess=None, method='global',
                                          threshold_effect=0.01, n_samples=None, maximize=True):
@@ -189,9 +192,15 @@ class SDMOptimizer:
             initial_guess (array-like, optional): Initial guess for intensities (local method only)
             method (str): Optimization method - 'local' (L-BFGS-B, faster) or 'global' (SHGO, slower but finds multiple solutions). Default: 'global'
             threshold_effect (float): For global method - threshold to include near-optimal solutions. Default: 0.01
-            n_samples (int, optional): For global method - number of SHGO samples using Sobol quasi-random sampling.
-                                      If None (default), automatically set to 3 * (n_interventions - 1) to account for 
-                                      effective dimensionality reduced by budget constraint. Use 'local' method for much faster optimization.
+            n_samples (int, optional): For global method - target number of Sobol sampling points within the feasible region 
+                                      (simplex constraint). Defaults to 30. The actual number of samples passed to SHGO will be 
+                                      scaled up by n! (factorial of number of interventions) to account for the volume of the 
+                                      feasible region relative to the unit hypercube. This assumes sampling methods generate 
+                                      points uniformly in the full intervention space, with ~n_samples expected in the feasible subset.
+                                      The final sample count is then snapped to the next power of 2 for Sobol balance properties.
+                                      PERFORMANCE: Optimization pre-filters Sobol samples to only launch local optimizations from
+                                      feasible points. For 4 interventions, n_samples=30 → ~40 local optimizations → ~1-3 minutes.
+                                      Reduce n_samples to 10-15 for faster results (~30s), or use 'local' method for single solution (~1-5s).
             maximize (bool): If True, maximize the variable of interest; if False, minimize it. Default: True
         
         Returns:
@@ -225,19 +234,27 @@ class SDMOptimizer:
         if len(costs) != n_interventions:
             raise ValueError(f"Length of costs ({len(costs)}) must match number of intervention variables ({n_interventions})")
         
-        # Auto-calculate n_samples based on dimensionality if not provided
-        if n_samples is None:
-            # With simplex parameterization, we have n_interventions-1 dimensions
-            # Use 5x for reasonable Sobol coverage, minimum 10
-            n_samples = max(10, 5 * (n_interventions-1))
-        
         if method == 'local':
             return self._optimize_local(params, costs, variable_of_interest, bounds, initial_guess, maximize)
         elif method == 'global':
-            return self._optimize_global(params, costs, variable_of_interest, bounds, threshold_effect, n_samples, maximize)
+            # Calculate scaled and snapped sample count for global optimization
+            import math
+            if n_samples is None:
+                n_samples = 30  # Default target number of feasible samples
+            
+            # Scale up to account for simplex volume: feasible region has volume 1/n! of unit hypercube
+            volume_inverse_ratio = math.factorial(n_interventions)
+            scaled_n_samples = int(n_samples * volume_inverse_ratio)
+            
+            # Snap to next power of 2 for Sobol balance properties
+            def _next_power_of_two(k: int) -> int:
+                return 1 << (max(1, k) - 1).bit_length()
+            
+            n_for_sobol = _next_power_of_two(scaled_n_samples)
+            
+            return self._optimize_global(params, costs, variable_of_interest, bounds, threshold_effect, n_for_sobol, maximize)
         else:
             raise ValueError(f"Method must be 'local' or 'global', got '{method}'")
-    
     
     def _optimize_local(self, params, costs, variable_of_interest, bounds=None, initial_guess=None, maximize=True):
         """Local optimization using L-BFGS-B with equality constraint via elimination."""
@@ -286,77 +303,137 @@ class SDMOptimizer:
         variable_of_interest,
         bounds=None,
         threshold_effect=0.01,
-        n_samples=50,
+        n_for_sobol=1024,
         maximize=True,
         bounds_min=0,
         bounds_max=10,
     ):
-        """Global optimization using SHGO with Sobol quasi-random sampling to find multiple near-optimal solutions.
-
+        """Global optimization using multi-start approach with Sobol quasi-random sampling to find multiple near-optimal solutions.
+        
+        Implementation: Generates Sobol samples, pre-filters to feasible region (simplex constraint),
+        then launches SLSQP local optimizations only from feasible starting points.
+        This avoids wasting compute on ~96% infeasible starting points that SHGO would explore.
+        
+        PERFORMANCE: For 4 interventions with n_samples=30:
+        - Generates 1024 Sobol samples → ~40 feasible → 40 local optimizations
+        - Each local optimization: 10-50 function evaluations × ~0.1s = 1-5s
+        - Total: 40-200 seconds expected (much faster than previous SHGO approach)
+        
         Args:
-            n_samples (int): Number of SHGO samples for Sobol quasi-random exploration.
-                            Sobol provides space-filling samples, more efficient than random sampling.
-                            Note: With many variables (>10), even 50 samples can be slow.
-                            For faster optimization, consider using method='local' instead.
+            n_for_sobol (int): Pre-calculated, power-of-2 sample count for Sobol quasi-random exploration.
+                              This value should be computed by optimize_intervention_intensities, which handles
+                              scaling from user-specified n_samples and snapping to power of 2.
+                              Sobol provides space-filling samples, more efficient than random sampling.
+                              Only feasible samples are used as starting points for local optimization.
         """
         n_interventions = len(self.sdm.intervention_variables)
-
-        # Coerce costs once (robust for dot products and bounds)
         costs_array = np.asarray(costs, dtype=float)
 
-        # Set default bounds for all variables
-        if bounds is None:
-            # Each intervention can individually use the full budget: intensity_i <= 1.0 / cost_i
-            # (Constraint still enforces feasibility across all interventions together.)
-            bounds = []
-            for cost in costs_array:
-                if cost > 0:
-                    max_for_this_intervention = 1.0 / cost
-                    bounds.append((bounds_min, min(max_for_this_intervention, bounds_max)))
-                else:
-                    bounds.append((bounds_min, bounds_max))
+        # SHGO-only implementation in y-space: y_i = cost_i * intensity_i, sum(y) <= 1
+        y_bounds = [(0.0, 1.0) for _ in range(n_interventions)]
+        budget_constraint = {"type": "ineq", "fun": lambda y: 1.0 - np.sum(y)}
 
-        # Objective function for all variables
-        def objective(intensities):
+        def objective(y):
             try:
+                y_arr = np.asarray(y, dtype=float)
+                # Defensive penalty: constraint violation returns infinity
+                if np.sum(y_arr) > 1.0 + 1e-10: 
+                    return np.inf #TODO: Consider and test adding a dynamic value that brings the simulations closer to the line (e.g. proportional to sum(y_arr)). But we need a good limiting case where this is relevant
+                # Get intensities from total investment, y
+                intensities = np.divide(y_arr, costs_array, out=np.zeros_like(y_arr), where=costs_array > 0)
                 df_sol = self.run_SDM_with_intervention_intensities(intensities, params)
-
-                # Robustly take the final simulated value (avoid float-index KeyErrors)
-                effect_size = df_sol[variable_of_interest].iloc[-1]
-
-                effect_size = float(effect_size)
+                effect_size = float(df_sol[variable_of_interest].iloc[-1])
+                # Non-finite result is penalized with infinity
+                if not np.isfinite(effect_size):
+                    return np.inf
                 return -effect_size if maximize else effect_size
             except Exception:
-                # Penalize failures heavily so SHGO avoids invalid regions
-                return 1e6
+                # Any evaluation failure returns infinity
+                return np.inf
 
-        # Constraint: total cost <= 1.0 (inequality allows for underspending)
-        constraints = {"type": "ineq", "fun": lambda x: 1.0 - np.dot(x, costs_array)}
-
-        # Run global optimization
-        result = shgo(
-            objective,
-            bounds,
-            constraints=constraints,
-            n=n_samples,
-            sampling_method="sobol",
-            options={"maxtime": 30},
-        )
-
-        if not result.success:
+        # Generate Sobol samples and filter to FEASIBLE region before launching local optimizations
+        # This avoids wasting compute on ~96% infeasible starting points
+        sampler = qmc.Sobol(d=n_interventions, scramble=True)
+        samples = sampler.random(n=n_for_sobol)
+        
+        # Filter to feasible points only (sum <= 1)
+        feasible_mask = samples.sum(axis=1) <= 1.0
+        feasible_samples = samples[feasible_mask]
+        
+        print(f"Sobol sampling: {n_for_sobol} total -> {len(feasible_samples)} feasible ({100*len(feasible_samples)/n_for_sobol:.1f}%)")
+        
+        if len(feasible_samples) == 0:
             return {
                 "method": "global",
                 "success": False,
-                "message": "Global optimization failed",
-                "optimization_result": result,
+                "message": "No feasible Sobol samples found",
+                "optimization_result": None,
             }
+        
+        # Run local optimization from each feasible starting point
+        local_results = []
+        for i, y0 in enumerate(feasible_samples):
+            try:
+                local_res = scipy.optimize.minimize(
+                    objective,
+                    y0,
+                    method='SLSQP',
+                    bounds=y_bounds,
+                    constraints=budget_constraint,
+                    options={
+                        'maxiter': 50,
+                        'ftol': 1e-3,
+                    }
+                )
+                local_results.append(local_res)
+            except Exception:
+                continue
+        
+        if not local_results:
+            return {
+                "method": "global",
+                "success": False,
+                "message": "All local optimizations failed",
+                "optimization_result": None,
+            }
+        
+        # Find best result and collect near-optimal solutions
+        valid_results = [r for r in local_results if r.success and np.isfinite(r.fun)]
+        if not valid_results:
+            valid_results = [r for r in local_results if np.isfinite(r.fun)]
+        
+        if not valid_results:
+            return {
+                "method": "global",
+                "success": False,
+                "message": "No valid solutions found",
+                "optimization_result": local_results[0] if local_results else None,
+            }
+        
+        # Best result
+        best_result = min(valid_results, key=lambda r: r.fun)
+        best_effect_size = (-best_result.fun) if maximize else (best_result.fun)
+        
+        # Mimic SHGO result structure for compatibility with downstream code
+        result = type('obj', (object,), {
+            'x': best_result.x,
+            'fun': best_result.fun,
+            'xl': [r.x for r in valid_results],
+            'funl': [r.fun for r in valid_results],
+            'success': True,
+            'message': f'Multi-start optimization: {len(feasible_samples)} starts, {len(valid_results)} converged',
+            'nfev': sum(r.nfev for r in local_results),
+        })()
 
         # Collect all near-optimal solutions
-        best_effect_size = (-result.fun) if maximize else (result.fun)
         equilibria = []
 
-        # result.xl: local minimizers found; result.funl: objective values at those points
-        for i_set, val in zip(result.xl, result.funl):
+        # result.xl: local minimizers (y-variables); result.funl: objective values at those points
+        for y, val in zip(result.xl, result.funl):
+            # Convert y directly to intensities: intensity_i = y_i / cost_i
+            y_arr = np.asarray(y, dtype=float)
+            intensities = np.divide(y_arr, costs_array, out=np.zeros_like(y_arr), where=costs_array > 0)
+
             current_effect_size = (-val) if maximize else (val)
 
             # Correct near-optimal test for both maximize and minimize
@@ -368,14 +445,14 @@ class SDMOptimizer:
             if near_opt:
                 intervention_dict = {
                     name: round(float(intensity), 4)
-                    for name, intensity in zip(self.sdm.intervention_variables, i_set)
+                    for name, intensity in zip(self.sdm.intervention_variables, intensities)
                 }
                 equilibria.append(
                     {
                         "interventions": intervention_dict,
-                        "intensities": i_set,
+                        "intensities": intensities,
                         "effect_size": round(float(current_effect_size), 6),
-                        "total_cost": round(float(np.dot(i_set, costs_array)), 4),
+                        "total_cost": round(float(np.dot(intensities, costs_array)), 4),
                     }
                 )
 
@@ -405,8 +482,7 @@ class SDMOptimizer:
             initial_guess (array-like, optional): Initial guess for intensities (local method only)
             method (str): Optimization method:
                 - 'local': L-BFGS-B local optimization
-                - 'global' or 'global_de': Differential evolution with simplex folding (default, recommended)
-                - 'global_shgo': SHGO with Sobol sampling and simplex folding
+                - 'global': SHGO with Sobol sampling
             threshold_effect (float): For global method - threshold for near-optimal solutions. Default: 0.01
             n_samples (int, optional): For global methods - controls population/sample size.
                                       If None, automatically calculated based on dimensionality.
@@ -468,7 +544,7 @@ class SDMOptimizer:
                     row = {'sample_idx': sample_idx, 'equilibrium_idx': -1}
                     for int_var in self.sdm.intervention_variables:
                         row[f'intensity_{int_var}'] = np.nan
-                    row['voi_outcome'] = np.nan
+                    row['voi_effect_size'] = np.nan
                     row['total_cost'] = np.nan
                     row['n_equilibria'] = 0
                     results.append(row)

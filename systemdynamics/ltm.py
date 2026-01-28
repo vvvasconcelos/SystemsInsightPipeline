@@ -216,21 +216,34 @@ class LoopsThatMatter:
     
     def _eval_equation(self, target, values, params):
         """
-        Evaluate a target equation from params (same logic as SDM).
-        
-        Handles Intercept and interaction terms (A * B).
-        
-        Args:
-            target: Target variable name
-            values: Dict of variable values
-            params: Parameter dictionary
-        
-        Returns:
-            Evaluated equation value (RHS for stocks, value for auxiliaries)
+        Evaluate a target equation from params (supports custom equations for auxiliaries).
+        Uses SDM's equation evaluator if available and target has a custom equation.
+
+        Expected custom equation parameter format (enforced):
+            params[target][f'__eq_params_{target}__'] = {'#1': val1, '#2': val2, ...}
+        Any other format will raise a ValueError.
         """
+        # Use SDM's equation evaluator for auxiliaries with custom equations
+        if (
+            hasattr(self.sdm, '_equation_evaluator')
+            and self.sdm._equation_evaluator is not None
+            and target in self.sdm.auxiliaries
+            and self.sdm._equation_evaluator.has_custom_equation(target)
+        ):
+            eq_params_full = params.get(target, {})
+            eq_key = f'__eq_params_{target}__'
+            if eq_key in eq_params_full and isinstance(eq_params_full[eq_key], dict):
+                eq_params = eq_params_full[eq_key]
+            else:
+                raise ValueError(
+                    f"Custom equation parameters for '{target}' must be provided as a nested dict under key '{eq_key}'. "
+                    f"Found: {type(eq_params_full.get(eq_key))} (keys: {list(eq_params_full.keys()) if isinstance(eq_params_full, dict) else eq_params_full})"
+                )
+            # Use 0.0 for intervention (no effect in LTM ceteris paribus)
+            return self.sdm._equation_evaluator.evaluate(target, values, eq_params, intervention=0.0)
+        # Otherwise, use linear logic (stocks, constants, or auxiliaries without custom eq)
         eq = params.get(target, {})
         total = float(eq.get("Intercept", 0.0))
-        
         for term, coef in eq.items():
             if term == "Intercept":
                 continue
@@ -243,7 +256,6 @@ class LoopsThatMatter:
             else:
                 # Linear term
                 total += float(coef) * float(values.get(term, 0.0))
-        
         return total
     
     def _delta_z_ceteris(self, target, source, curr_vals, prev_vals, params):
