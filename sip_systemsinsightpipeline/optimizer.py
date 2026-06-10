@@ -1,555 +1,816 @@
 """
-Optimization module for System Dynamics Models.
+Intervention optimization module for System Dynamics Models (SDM).
 
-This module provides intervention optimization functionality for SDM models,
-including local and global optimization methods.
+Key design choices:
+- Single formulation in expenditure space y (one decision variable per intervention channel)
+    y_i >= 0,  sum_i y_i <= budget
+    intensity_i = y_i / cost_i
+- Multi-start constrained local optimization (SLSQP) with quasi-random (Sobol) starts
+- "Local" behavior is achieved by setting n_starts=1 (no separate local implementation)
+- Costs must be strictly positive (<= 0 raises)
+- Robust VOI extraction uses .iloc[-1]
+- Near-optimal solutions use (atol, rtol)
+- No np.inf returned to optimizers; use a large finite penalty and track failures
+- Dedupe equilibria in y-space using tolerance (no rounding-based uniqueness)
+- Reproducible sampling via seed parameter
+- Parameter sample ↔ optimum mapping supported via returning/storing parameter samples
 """
 
+from __future__ import annotations
+
 import warnings
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+
 import numpy as np
 import pandas as pd
 import scipy.optimize
+from scipy.optimize import OptimizeResult
 from scipy.stats import qmc
-import scipy
 from copy import deepcopy
-from tqdm import tqdm
+
+try:
+    from tqdm import tqdm
+except Exception:  # pragma: no cover
+    tqdm = None  # type: ignore
+
+
+@dataclass
+class OptimizationDiagnostics:
+    """Lightweight diagnostics to support debugging and performance tuning."""
+    algorithm: str
+    budget: float
+    n_interventions: int
+    n_starts_requested: int
+    n_starts_used: int
+    n_converged: int
+    n_valid: int
+    n_failed: int
+    total_nfev: int
+    total_nit: int
+    exception_count: int
+    first_exception: Optional[str]
+    max_abs_effect_observed: Optional[float]
+    penalty_value: float
+    seed: Optional[int]
+
+
+@dataclass
+class Equilibrium:
+    """A (near-)optimal solution candidate."""
+    y: np.ndarray
+    intensities: np.ndarray
+    effect_size: float
+    total_cost: float
+    fun: float  # objective value (minimized)
 
 
 class SDMOptimizer:
     """
-    Optimizer for System Dynamics Models.
-    
-    This class provides methods to optimize intervention intensities for an SDM model
-    subject to budget constraints.
-    
-    Args:
-        sdm: An SDM instance to optimize
-    
-    Example:
-        >>> from systemdynamics.sdm import SDM
-        >>> from systemdynamics.optimizer import SDMOptimizer
-        >>> sdm = SDM(settings)
-        >>> optimizer = SDMOptimizer(sdm)
-        >>> result = optimizer.optimize_intervention_intensities(params, costs)
+    Optimizer for System Dynamics Models (SDM).
+
+    This class optimizes intervention expenditures y under a budget constraint:
+        y_i >= 0,  sum(y) <= budget
+    and converts to intervention intensities:
+        intensity_i = y_i / cost_i
+
+    Parameters
+    ----------
+    sdm : object
+        SDM instance. Expected attributes/methods (as used in your existing codebase):
+        - intervention_variables: List[str]
+        - intervention_strengths: Dict[str, float]
+        - stocks: List[str]
+        - constants: List[str]
+        - stocks_and_auxiliaries: Iterable[str]
+        - variable_of_interest: List[str] or similar
+        - interaction_terms: bool / list
+        - params_to_A_b(params, constants_values) -> (A, b)
+        - run_SDM(x0, constants_values, A, b, params) -> pd.DataFrame
+        - sample_model_parameters() -> dict
+        - N : int (number of parameter samples, optional)
+        - _equation_evaluator with has_custom_equation(var) (optional)
+
+    Notes
+    -----
+    This optimizer currently uses a multi-start SLSQP strategy. The API is structured
+    to allow adding additional algorithms later (e.g., SHGO, CMA-ES, etc.) without
+    reintroducing a separate "local" implementation.
     """
-    
-    def __init__(self, sdm):
+
+    def __init__(self, sdm: Any):
         self.sdm = sdm
-    
-    def run_SDM_with_intervention_intensities(self, intervention_intensities, params):
-        """ 
-        Run the SDM with intervention intensities for each intervention variable for a given parameter set.
-        
-        Args:
-            intervention_intensities (array-like): Vector of intervention intensities (magnitudes), one for each 
-                                                   intervention variable in self.sdm.intervention_variables. 
-                                                   Length must equal len(self.sdm.intervention_variables).
-                                                   Intensities are always positive values representing the magnitude.
-                                                   The direction (increase/decrease) is determined by the sign in 
-                                                   self.sdm.intervention_strengths from the Excel file.
-                                                   Example: [1, 0, 0, 0] applies only the first intervention at intensity 1.
-                                                           [0.5, 0.5, 0, 0] applies first two interventions each at intensity 0.5.
-                                                   If intervention_strengths[var] is negative, the variable will be decreased.
-            params (dict): Parameter dictionary specifying the model structure 
-        
-        Returns:
-            pd.DataFrame: Solution dataframe with all variables (stocks, constants, and auxiliaries) at each time step
+        self._last_parameter_samples: Optional[List[Dict[str, Any]]] = None
+
+    # ---------------------------------------------------------------------
+    # Model execution
+    # ---------------------------------------------------------------------
+    def run_SDM_with_intervention_intensities(
+        self,
+        intervention_intensities: Union[np.ndarray, List[float]],
+        params: Dict[str, Any],
+    ) -> pd.DataFrame:
         """
-        # Validate input
-        if len(intervention_intensities) != len(self.sdm.intervention_variables):
-            raise ValueError(f"Length of intervention_intensities ({len(intervention_intensities)}) must match "
-                           f"number of intervention variables ({len(self.sdm.intervention_variables)})")
-        
-        # Make a copy of params to avoid modifying the original
+        Run SDM with intervention intensities applied.
+
+        Interventions are applied as positive magnitudes; direction is determined
+        by the sign of self.sdm.intervention_strengths[var] (or sub-vars for "A+B").
+        """
+        intervention_intensities = np.asarray(intervention_intensities, dtype=float)
+
+        n_vars = len(self.sdm.intervention_variables)
+        if intervention_intensities.shape[0] != n_vars:
+            raise ValueError(
+                f"Length of intervention_intensities ({intervention_intensities.shape[0]}) "
+                f"must match number of intervention variables ({n_vars})."
+            )
+
+        # Defensive copy to avoid in-place mutation of caller's params
         params = deepcopy(params)
-        
+
         # Initialize intervention arrays
         x0 = np.zeros(len(self.sdm.stocks), dtype=np.float64)
         constants_values = np.zeros(len(self.sdm.constants), dtype=np.float64)
-        
-        # Reset current intervention intensities for custom equations
+
+        # Preserve and restore SDM mutable state to reduce cross-run contamination
+        prev_current = getattr(self.sdm, "_current_intervention_intensities", None)
         self.sdm._current_intervention_intensities = {}
-        
-        # Apply interventions based on intensities for each intervention variable
-        # The intensity is always positive, but the direction is determined by the sign in intervention_strengths
-        for var, intensity in zip(self.sdm.intervention_variables, intervention_intensities):
-            if intensity == 0:  # Skip if no intervention
-                continue
-            
-            # Get the sign from intervention_strengths (positive or negative intervention)
-            intervention_sign = np.sign(self.sdm.intervention_strengths[var]) if self.sdm.intervention_strengths[var] != 0 else 1.0
-            signed_intensity = intensity * intervention_sign
-            
-            if '+' not in var:  # Single factor intervention
-                if var in self.sdm.stocks:
-                    x0[self.sdm.stocks.index(var)] += signed_intensity
-                elif var in self.sdm.constants:
-                    constants_values[self.sdm.constants.index(var)] += signed_intensity
-                else:
-                    # Track intervention intensity for custom equations
-                    self.sdm._current_intervention_intensities[var] = signed_intensity
-                    # Only set intercept if no custom equation
-                    if not (self.sdm._equation_evaluator and self.sdm._equation_evaluator.has_custom_equation(var)):
-                        params[var]["Intercept"] = signed_intensity
-            
-            else:  # Double factor intervention
-                var_1, var_2 = var.split('+')
-                sign_1 = np.sign(self.sdm.intervention_strengths[var_1]) if self.sdm.intervention_strengths[var_1] != 0 else 1.0
-                sign_2 = np.sign(self.sdm.intervention_strengths[var_2]) if self.sdm.intervention_strengths[var_2] != 0 else 1.0
-                
-                if var_1 in self.sdm.stocks:
-                    x0[self.sdm.stocks.index(var_1)] += intensity * sign_1
-                elif var_1 in self.sdm.constants:
-                    constants_values[self.sdm.constants.index(var_1)] += intensity * sign_1
-                else:
-                    self.sdm._current_intervention_intensities[var_1] = intensity * sign_1
-                    if not (self.sdm._equation_evaluator and self.sdm._equation_evaluator.has_custom_equation(var_1)):
-                        params[var_1]["Intercept"] = intensity * sign_1
-                
-                if var_2 in self.sdm.stocks:
-                    x0[self.sdm.stocks.index(var_2)] += intensity * sign_2
-                elif var_2 in self.sdm.constants:
-                    constants_values[self.sdm.constants.index(var_2)] += intensity * sign_2
-                else:
-                    self.sdm._current_intervention_intensities[var_2] = intensity * sign_2
-                    if not (self.sdm._equation_evaluator and self.sdm._equation_evaluator.has_custom_equation(var_2)):
-                        params[var_2]["Intercept"] = intensity * sign_2
-        
-        # Get system matrices A and b
-        if self.sdm.interaction_terms:
-            A = None
-            b = None
-        else:
-            A, b = self.sdm.params_to_A_b(params, constants_values)
-        
-        # Run the SDM and return the solution
-        df_sol = self.sdm.run_SDM(x0, constants_values, A, b, params)
-        
-        return df_sol
 
-    def _compute_intervention_intensity_last(self, intensities_opt, costs):
-        """
-        Compute the last intervention intensity from the cost constraint.
-        
-        Args:
-            intensities_opt (array-like): Intensities for the first n-1 interventions
-            costs (array-like): Cost for each intervention variable
-        
-        Returns:
-            float: Intensity for the last intervention
-        """
-        cost_burden = np.sum(np.array(intensities_opt) * np.array(costs[:-1]))
-        intensity_last = (1.0 - cost_burden) / costs[-1]
-        return intensity_last
-
-    def _objective_function_intervention_opt(self, intensities_opt, params, costs, variable_of_interest, maximize=True):
-        """
-        Objective function for optimization.
-        
-        Args:
-            intensities_opt (array-like): Intensities for the first n-1 interventions
-            params (dict): Parameter dictionary
-            costs (array-like): Cost for each intervention variable
-            variable_of_interest (str): Variable to optimize for
-            maximize (bool): If True, maximize the variable; if False, minimize it
-        
-        Returns:
-            float: Objective value (negated if maximizing, for use with minimization algorithms)
-        """
-        # Compute the last intervention intensity
-        intensity_last = self._compute_intervention_intensity_last(intensities_opt, costs)
-        
-        # Construct full intensity vector
-        intervention_intensities = np.concatenate([intensities_opt, [intensity_last]])
-        
         try:
-            # Run the model
-            df_sol = self.run_SDM_with_intervention_intensities(intervention_intensities, params)
-            
-            # Get the effect size at final time
-            effect_size = df_sol.loc[self.sdm.t_eval[-1], variable_of_interest]
-            
-            # Return negative for maximization (since optimizer minimizes)
-            # Return positive for minimization
-            return -float(effect_size) if maximize else float(effect_size)
-        except:
-            # Return a large penalty if the model fails
-            return 1e6
+            for var, intensity in zip(self.sdm.intervention_variables, intervention_intensities):
+                if intensity == 0.0:
+                    continue
 
+                # Single vs compound intervention channel
+                if "+" not in var:
+                    intervention_sign = (
+                        np.sign(self.sdm.intervention_strengths.get(var, 1.0))
+                        if self.sdm.intervention_strengths.get(var, 0.0) != 0.0
+                        else 1.0
+                    )
+                    signed_intensity = float(intensity) * float(intervention_sign)
 
-    #TODO: Consider whether local method is just an implementation of global with a specified sampling method and very low n_samples
-    def optimize_intervention_intensities(self, params, costs, variable_of_interest=None, 
-                                         bounds=None, initial_guess=None, method='global',
-                                         threshold_effect=0.01, n_samples=None, maximize=True):
+                    if var in self.sdm.stocks:
+                        x0[self.sdm.stocks.index(var)] += signed_intensity
+                    elif var in self.sdm.constants:
+                        constants_values[self.sdm.constants.index(var)] += signed_intensity
+                    else:
+                        self.sdm._current_intervention_intensities[var] = signed_intensity
+                        # Only set intercept if no custom equation
+                        if not (
+                            getattr(self.sdm, "_equation_evaluator", None)
+                            and self.sdm._equation_evaluator.has_custom_equation(var)
+                        ):
+                            if var not in params:
+                                params[var] = {}
+                            params[var]["Intercept"] = signed_intensity
+
+                else:
+                    parts = [p.strip() for p in var.split("+")]
+                    if len(parts) != 2:
+                        raise ValueError(
+                            f"Compound intervention variable '{var}' must split into exactly two parts."
+                        )
+                    var_1, var_2 = parts
+
+                    sign_1 = (
+                        np.sign(self.sdm.intervention_strengths.get(var_1, 1.0))
+                        if self.sdm.intervention_strengths.get(var_1, 0.0) != 0.0
+                        else 1.0
+                    )
+                    sign_2 = (
+                        np.sign(self.sdm.intervention_strengths.get(var_2, 1.0))
+                        if self.sdm.intervention_strengths.get(var_2, 0.0) != 0.0
+                        else 1.0
+                    )
+
+                    delta_1 = float(intensity) * float(sign_1)
+                    delta_2 = float(intensity) * float(sign_2)
+
+                    if var_1 in self.sdm.stocks:
+                        x0[self.sdm.stocks.index(var_1)] += delta_1
+                    elif var_1 in self.sdm.constants:
+                        constants_values[self.sdm.constants.index(var_1)] += delta_1
+                    else:
+                        self.sdm._current_intervention_intensities[var_1] = delta_1
+                        if not (
+                            getattr(self.sdm, "_equation_evaluator", None)
+                            and self.sdm._equation_evaluator.has_custom_equation(var_1)
+                        ):
+                            if var_1 not in params:
+                                params[var_1] = {}
+                            params[var_1]["Intercept"] = delta_1
+
+                    if var_2 in self.sdm.stocks:
+                        x0[self.sdm.stocks.index(var_2)] += delta_2
+                    elif var_2 in self.sdm.constants:
+                        constants_values[self.sdm.constants.index(var_2)] += delta_2
+                    else:
+                        self.sdm._current_intervention_intensities[var_2] = delta_2
+                        if not (
+                            getattr(self.sdm, "_equation_evaluator", None)
+                            and self.sdm._equation_evaluator.has_custom_equation(var_2)
+                        ):
+                            if var_2 not in params:
+                                params[var_2] = {}
+                            params[var_2]["Intercept"] = delta_2
+
+            # Get system matrices A and b (if applicable)
+            if getattr(self.sdm, "interaction_terms", None):
+                A = None
+                b = None
+            else:
+                A, b = self.sdm.params_to_A_b(params, constants_values)
+
+            df_sol = self.sdm.run_SDM(x0, constants_values, A, b, params)
+            return df_sol
+
+        finally:
+            # Restore state (best-effort)
+            self.sdm._current_intervention_intensities = prev_current if prev_current is not None else {}
+
+    # ---------------------------------------------------------------------
+    # Optimization
+    # ---------------------------------------------------------------------
+    def optimize_intervention_intensities(
+        self,
+        params: Dict[str, Any],
+        costs: Union[np.ndarray, List[float]],
+        variable_of_interest: Optional[str] = None,
+        *,
+        budget: float = 1.0,
+        maximize: bool = True,
+        # starts / sampling
+        n_starts: Optional[int] = 8,
+        seed: Optional[int] = None,
+        sobol_power_of_two: bool = True,
+        # near-optimal selection (effect size primary, total cost secondary)
+        threshold_atol: float = 0.01,
+        threshold_rtol: float = 0.0,
+        cost_atol: float = 0.01,
+        # dedupe in y-space
+        y_dedupe_tol: float = 1e-6,
+        # optimizer options
+        slsqp_maxiter: int = 1000,
+        slsqp_ftol: float = 1e-9,
+        # penalty behavior
+        penalty_value: float = 1e30,
+        constraint_tol: float = 1e-12,
+        debug: bool = False,
+        # extensibility
+        algorithm: str = "multistart_slsqp",
+        # backwards compatibility alias (optional)
+        n_samples: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """
-        Optimize intervention intensities for a given parameter set subject to a cost constraint.
-        
-        Args:
-            params (dict): Parameter dictionary for the model
-            costs (array-like): Relative cost for each intervention variable
-            variable_of_interest (str, optional): Variable to optimize for. If None, uses self.sdm.variable_of_interest[0]
-            bounds (list, optional): Bounds for intensities. Default: [0, 5]
-            initial_guess (array-like, optional): Initial guess for intensities (local method only)
-            method (str): Optimization method - 'local' (L-BFGS-B, faster) or 'global' (SHGO, slower but finds multiple solutions). Default: 'global'
-            threshold_effect (float): For global method - threshold to include near-optimal solutions. Default: 0.01
-            n_samples (int, optional): For global method - target number of Sobol sampling points within the feasible region 
-                                      (simplex constraint). Defaults to 30. The actual number of samples passed to SHGO will be 
-                                      scaled up by n! (factorial of number of interventions) to account for the volume of the 
-                                      feasible region relative to the unit hypercube. This assumes sampling methods generate 
-                                      points uniformly in the full intervention space, with ~n_samples expected in the feasible subset.
-                                      The final sample count is then snapped to the next power of 2 for Sobol balance properties.
-                                      PERFORMANCE: Optimization pre-filters Sobol samples to only launch local optimizations from
-                                      feasible points. For 4 interventions, n_samples=30 → ~40 local optimizations → ~1-3 minutes.
-                                      Reduce n_samples to 10-15 for faster results (~30s), or use 'local' method for single solution (~1-5s).
-            maximize (bool): If True, maximize the variable of interest; if False, minimize it. Default: True
-        
-        Returns:
-            dict: For local method:
-                - 'method': 'local'
-                - 'optimized_intensities': Full intensity vector
-                - 'effect_size': Optimal VOI value at final time
-                - 'success': Whether optimization succeeded
-                - 'n_evaluations': Number of function evaluations
-                - 'optimization_result': Full scipy result object
-            
-            For global method:
-                - 'method': 'global'
-                - 'success': Whether optimization succeeded
-                - 'n_equilibria': Number of near-optimal solutions found
-                - 'equilibria': List of dicts with 'interventions', 'effect_size', 'total_cost'
-                - 'best_effect_size': Best effect_size value found
-                - 'optimization_result': Full scipy result object
+        Optimize intervention strategy for one parameter set.
+
+        Decision variable is y (expenditure per intervention channel):
+            y_i >= 0, sum(y) <= budget
+        Intensities are computed as intensity_i = y_i / cost_i.
+
+        Parameters
+        ----------
+        params : dict
+            Parameter dictionary for the SDM.
+        costs : array-like
+            Strictly positive costs for each intervention channel.
+        variable_of_interest : str, optional
+            Variable to optimize at final time.
+        budget : float
+            Total budget for expenditures y (default 1.0).
+        maximize : bool
+            Whether to maximize or minimize the VOI.
+        n_starts : int
+            Number of multi-start initial points (feasible) for SLSQP. If None, defaults to 30.
+        seed : int, optional
+            Random seed for reproducible scrambled Sobol sampling.
+        sobol_power_of_two : bool
+            If True, use next power-of-two >= n_starts for Sobol balance properties.
+        threshold_atol, threshold_rtol : float
+            Near-optimal inclusion rule for effect size (primary criterion):
+              maximize:  best - current <= atol + rtol*abs(best)
+              minimize:  current - best <= atol + rtol*abs(best)
+        cost_atol : float
+            Near-optimal inclusion rule for total cost (secondary criterion):
+            Among solutions passing effect size filter, keep those within cost_atol of the minimum cost.
+        y_dedupe_tol : float
+            Dedupe solutions by Euclidean distance in y-space.
+        slsqp_maxiter, slsqp_ftol : optimizer tuning parameters.
+        penalty_value : float
+            Large finite penalty used when model evaluation fails or returns non-finite VOI.
+        debug : bool
+            If True, re-raise objective exceptions instead of penalizing.
+        algorithm : str
+            Currently only "multistart_slsqp" is implemented.
+        n_samples : int, optional
+            Deprecated alias for n_starts.
+
+        Returns
+        -------
+        dict
+            - method: algorithm name
+            - success: bool
+            - n_equilibria: int
+            - equilibria: list of equilibria dicts
+            - best_effect_size: float
+            - best_intensities: np.ndarray
+            - best_y: np.ndarray
+            - optimization_result: OptimizeResult (best run)
+            - diagnostics: OptimizationDiagnostics
+            - per_start_results: list[OptimizeResult] (all starts, for debugging/tuning)
         """
+        if n_samples is not None and n_starts is None:
+            warnings.warn("n_samples is deprecated; use n_starts instead. Treating n_samples as n_starts.")
+            n_starts = int(n_samples)
+
         if variable_of_interest is None:
             variable_of_interest = self.sdm.variable_of_interest[0]
-        
-        # Print a warning if the variable of interest is not in the model
-        if variable_of_interest not in self.sdm.stocks_and_auxiliaries:
-            warnings.warn(f"Variable of interest '{variable_of_interest}' not found in model variables.")
 
-        
-        costs = np.asarray(costs)
-        n_interventions = len(self.sdm.intervention_variables)
-        
-        if len(costs) != n_interventions:
-            raise ValueError(f"Length of costs ({len(costs)}) must match number of intervention variables ({n_interventions})")
-        
-        if method == 'local':
-            return self._optimize_local(params, costs, variable_of_interest, bounds, initial_guess, maximize)
-        elif method == 'global':
-            # Calculate scaled and snapped sample count for global optimization
-            import math
-            if n_samples is None:
-                n_samples = 30  # Default target number of feasible samples
-            
-            # Scale up to account for simplex volume: feasible region has volume 1/n! of unit hypercube
-            volume_inverse_ratio = math.factorial(n_interventions)
-            scaled_n_samples = int(n_samples * volume_inverse_ratio)
-            
-            # Snap to next power of 2 for Sobol balance properties
-            def _next_power_of_two(k: int) -> int:
-                return 1 << (max(1, k) - 1).bit_length()
-            
-            n_for_sobol = _next_power_of_two(scaled_n_samples)
-            
-            return self._optimize_global(params, costs, variable_of_interest, bounds, threshold_effect, n_for_sobol, maximize)
-        else:
-            raise ValueError(f"Method must be 'local' or 'global', got '{method}'")
-    
-    def _optimize_local(self, params, costs, variable_of_interest, bounds=None, initial_guess=None, maximize=True):
-        """Local optimization using L-BFGS-B with equality constraint via elimination."""
-        n_interventions = len(self.sdm.intervention_variables)
-        
-        # Set default bounds for n-1 variables
-        if bounds is None:
-            bounds = [(0, 5) for _ in range(n_interventions - 1)]
-        
-        # Set initial guess
-        if initial_guess is None:
-            initial_guess = np.ones(n_interventions - 1) / np.sum(costs[:-1])
-        
-        initial_guess = np.asarray(initial_guess[:n_interventions - 1])
-        
-        # Run optimization
-        result = scipy.optimize.minimize(
-            self._objective_function_intervention_opt,
-            initial_guess,
-            args=(params, costs, variable_of_interest, maximize),
-            method='L-BFGS-B',
-            bounds=bounds,
-            options={'ftol': 1e-6, 'gtol': 1e-5}
-        )
-        
-        # Extract optimized intensities
-        optimized_intensities = np.concatenate([result.x, [self._compute_intervention_intensity_last(result.x, costs)]])
-        
-        # Evaluate objective at optimized point
-        df_sol = self.run_SDM_with_intervention_intensities(optimized_intensities, params)
-        optimal_effect_size = df_sol.loc[self.sdm.t_eval[-1], variable_of_interest]
-        
-        return {
-            'method': 'local',
-            'optimized_intensities': optimized_intensities,
-            'effect_size': optimal_effect_size,
-            'success': result.success,
-            'n_evaluations': result.nfev,
-            'optimization_result': result
-        }
-    
-    def _optimize_global(
-        self,
-        params,
-        costs,
-        variable_of_interest,
-        bounds=None,
-        threshold_effect=0.01,
-        n_for_sobol=1024,
-        maximize=True,
-        bounds_min=0,
-        bounds_max=10,
-    ):
-        """Global optimization using multi-start approach with Sobol quasi-random sampling to find multiple near-optimal solutions.
-        
-        Implementation: Generates Sobol samples, pre-filters to feasible region (simplex constraint),
-        then launches SLSQP local optimizations only from feasible starting points.
-        This avoids wasting compute on ~96% infeasible starting points that SHGO would explore.
-        
-        PERFORMANCE: For 4 interventions with n_samples=30:
-        - Generates 1024 Sobol samples → ~40 feasible → 40 local optimizations
-        - Each local optimization: 10-50 function evaluations × ~0.1s = 1-5s
-        - Total: 40-200 seconds expected (much faster than previous SHGO approach)
-        
-        Args:
-            n_for_sobol (int): Pre-calculated, power-of-2 sample count for Sobol quasi-random exploration.
-                              This value should be computed by optimize_intervention_intensities, which handles
-                              scaling from user-specified n_samples and snapping to power of 2.
-                              Sobol provides space-filling samples, more efficient than random sampling.
-                              Only feasible samples are used as starting points for local optimization.
-        """
-        n_interventions = len(self.sdm.intervention_variables)
+        # Warning / early exit if VOI not present
+        voi_known = variable_of_interest in getattr(self.sdm, "stocks_and_auxiliaries", [])
+        if not voi_known:
+            warnings.warn(
+                f"Variable of interest '{variable_of_interest}' not found in model variables. "
+                f"Skipping optimization for this parameter set."
+            )
+            diag = OptimizationDiagnostics(
+                algorithm=algorithm,
+                budget=float(budget),
+                n_interventions=len(self.sdm.intervention_variables),
+                n_starts_requested=int(n_starts or 0),
+                n_starts_used=0,
+                n_converged=0,
+                n_valid=0,
+                n_failed=0,
+                total_nfev=0,
+                total_nit=0,
+                exception_count=0,
+                first_exception=None,
+                max_abs_effect_observed=None,
+                penalty_value=float(penalty_value),
+                seed=seed,
+            )
+            return {
+                "method": algorithm,
+                "success": False,
+                "message": "VOI not found",
+                "n_equilibria": 0,
+                "equilibria": [],
+                "best_effect_size": np.nan,
+                "best_intensities": None,
+                "best_y": None,
+                "optimization_result": None,
+                "diagnostics": diag,
+                "per_start_results": [],
+            }
+
         costs_array = np.asarray(costs, dtype=float)
+        n_interventions = len(self.sdm.intervention_variables)
 
-        # SHGO-only implementation in y-space: y_i = cost_i * intensity_i, sum(y) <= 1
-        y_bounds = [(0.0, 1.0) for _ in range(n_interventions)]
-        budget_constraint = {"type": "ineq", "fun": lambda y: 1.0 - np.sum(y)}
+        if costs_array.shape[0] != n_interventions:
+            raise ValueError(
+                f"Length of costs ({costs_array.shape[0]}) must match number of intervention variables ({n_interventions})."
+            )
+        if np.any(~np.isfinite(costs_array)):
+            raise ValueError("All costs must be finite numbers.")
+        if np.any(costs_array <= 0.0):
+            raise ValueError("All costs must be strictly positive (> 0).")
 
-        def objective(y):
+        if not np.isfinite(budget) or budget <= 0.0:
+            raise ValueError("budget must be a finite positive number.")
+
+        if n_starts is None:
+            n_starts = 8
+        if n_starts <= 0:
+            raise ValueError("n_starts must be a positive integer.")
+
+        if algorithm != "multistart_slsqp":
+            raise ValueError(f"Unknown algorithm '{algorithm}'. Only 'multistart_slsqp' is implemented.")
+
+        # --- Generate feasible start points directly in the simplex sum(y) <= budget
+        # Use Sobol in dimension (d+1):
+        #   - first d uniforms -> Dirichlet(1) via -log(u) normalization (sum=1)
+        #   - last uniform -> radial scaling u^(1/d) for uniform volume in simplex
+        n_draw = self._next_power_of_two(n_starts) if sobol_power_of_two else n_starts
+        sampler = qmc.Sobol(d=n_interventions + 1, scramble=True, seed=seed)
+        u = sampler.random(n=n_draw)
+
+        starts_y = self._sobol_to_simplex_y(u, budget=budget)
+        # If user requested fewer starts than drawn for Sobol properties, we use all drawn starts.
+        # (This keeps Sobol balance and is usually what you want for multistart.)
+        n_starts_used = starts_y.shape[0]
+
+        # --- Objective + monitoring
+        exception_count = 0
+        first_exception: Optional[str] = None
+        max_abs_effect: Optional[float] = None
+
+        def objective(y: np.ndarray) -> float:
+            nonlocal exception_count, first_exception, max_abs_effect
+
+            y_arr = np.asarray(y, dtype=float)
+
+            # Defensive check: stay in feasible region
+            s = float(np.sum(y_arr))
+            if s > budget * (1.0 + 1e-10):
+                # Prefer a finite penalty (not inf) for optimizer robustness
+                violation = max(0.0, s - budget)
+                return float(penalty_value) + float(penalty_value) * violation
+
+            # Convert expenditure y -> intensities
+            intensities = y_arr / costs_array  # costs are strictly positive by validation
+
             try:
-                y_arr = np.asarray(y, dtype=float)
-                # Defensive penalty: constraint violation returns infinity
-                if np.sum(y_arr) > 1.0 + 1e-10: 
-                    return np.inf #TODO: Consider and test adding a dynamic value that brings the simulations closer to the line (e.g. proportional to sum(y_arr)). But we need a good limiting case where this is relevant
-                # Get intensities from total investment, y
-                intensities = np.divide(y_arr, costs_array, out=np.zeros_like(y_arr), where=costs_array > 0)
                 df_sol = self.run_SDM_with_intervention_intensities(intensities, params)
-                effect_size = float(df_sol[variable_of_interest].iloc[-1])
-                # Non-finite result is penalized with infinity
-                if not np.isfinite(effect_size):
-                    return np.inf
-                return -effect_size if maximize else effect_size
-            except Exception:
-                # Any evaluation failure returns infinity
-                return np.inf
+                effect = float(df_sol[variable_of_interest].iloc[-1])
 
-        # Generate Sobol samples and filter to FEASIBLE region before launching local optimizations
-        # This avoids wasting compute on ~96% infeasible starting points
-        sampler = qmc.Sobol(d=n_interventions, scramble=True)
-        samples = sampler.random(n=n_for_sobol)
-        
-        # Filter to feasible points only (sum <= 1)
-        feasible_mask = samples.sum(axis=1) <= 1.0
-        feasible_samples = samples[feasible_mask]
-        
-        print(f"Sobol sampling: {n_for_sobol} total -> {len(feasible_samples)} feasible ({100*len(feasible_samples)/n_for_sobol:.1f}%)")
-        
-        if len(feasible_samples) == 0:
+                if not np.isfinite(effect):
+                    return float(penalty_value)
+
+                if max_abs_effect is None:
+                    max_abs_effect = abs(effect)
+                else:
+                    max_abs_effect = max(max_abs_effect, abs(effect))
+
+                # Minimize objective
+                return -effect if maximize else effect
+
+            except Exception as e:
+                exception_count += 1
+                if first_exception is None:
+                    first_exception = f"{type(e).__name__}: {e}"
+
+                if debug:
+                    raise
+
+                return float(penalty_value)
+
+        # Constraint: sum(y) <= budget
+        budget_constraint = {"type": "ineq", "fun": lambda y: budget - np.sum(y)}
+
+        # Bounds: each y_i in [0, budget]
+        y_bounds = [(0.0, float(budget)) for _ in range(n_interventions)]
+
+        # --- Run local optimization from each start
+        per_start_results: List[OptimizeResult] = []
+        for y0 in starts_y:
+            res = scipy.optimize.minimize(
+                objective,
+                y0,
+                method="SLSQP",
+                bounds=y_bounds,
+                constraints=budget_constraint,
+                options={"maxiter": int(slsqp_maxiter), "ftol": float(slsqp_ftol)},
+            )
+            per_start_results.append(res)
+
+        # --- Collect valid results
+        # Prefer success+finite, else allow finite-only to avoid total failure
+        success_finite = [r for r in per_start_results if bool(r.success) and np.isfinite(r.fun)]
+        finite_only = [r for r in per_start_results if np.isfinite(r.fun)]
+        valid_results = success_finite if len(success_finite) > 0 else finite_only
+
+        if len(valid_results) == 0:
+            diag = OptimizationDiagnostics(
+                algorithm=algorithm,
+                budget=float(budget),
+                n_interventions=n_interventions,
+                n_starts_requested=int(n_starts),
+                n_starts_used=int(n_starts_used),
+                n_converged=0,
+                n_valid=0,
+                n_failed=int(n_starts_used),
+                total_nfev=int(sum(getattr(r, "nfev", 0) for r in per_start_results)),
+                total_nit=int(sum(getattr(r, "nit", 0) for r in per_start_results)),
+                exception_count=int(exception_count),
+                first_exception=first_exception,
+                max_abs_effect_observed=max_abs_effect,
+                penalty_value=float(penalty_value),
+                seed=seed,
+            )
             return {
-                "method": "global",
-                "success": False,
-                "message": "No feasible Sobol samples found",
-                "optimization_result": None,
-            }
-        
-        # Run local optimization from each feasible starting point
-        local_results = []
-        for i, y0 in enumerate(feasible_samples):
-            try:
-                local_res = scipy.optimize.minimize(
-                    objective,
-                    y0,
-                    method='SLSQP',
-                    bounds=y_bounds,
-                    constraints=budget_constraint,
-                    options={
-                        'maxiter': 50,
-                        'ftol': 1e-3,
-                    }
-                )
-                local_results.append(local_res)
-            except Exception:
-                continue
-        
-        if not local_results:
-            return {
-                "method": "global",
-                "success": False,
-                "message": "All local optimizations failed",
-                "optimization_result": None,
-            }
-        
-        # Find best result and collect near-optimal solutions
-        valid_results = [r for r in local_results if r.success and np.isfinite(r.fun)]
-        if not valid_results:
-            valid_results = [r for r in local_results if np.isfinite(r.fun)]
-        
-        if not valid_results:
-            return {
-                "method": "global",
+                "method": algorithm,
                 "success": False,
                 "message": "No valid solutions found",
-                "optimization_result": local_results[0] if local_results else None,
+                "n_equilibria": 0,
+                "equilibria": [],
+                "best_effect_size": np.nan,
+                "best_intensities": None,
+                "best_y": None,
+                "optimization_result": None,
+                "diagnostics": diag,
+                "per_start_results": per_start_results,
             }
-        
-        # Best result
-        best_result = min(valid_results, key=lambda r: r.fun)
-        best_effect_size = (-best_result.fun) if maximize else (best_result.fun)
-        
-        # Mimic SHGO result structure for compatibility with downstream code
-        result = type('obj', (object,), {
-            'x': best_result.x,
-            'fun': best_result.fun,
-            'xl': [r.x for r in valid_results],
-            'funl': [r.fun for r in valid_results],
-            'success': True,
-            'message': f'Multi-start optimization: {len(feasible_samples)} starts, {len(valid_results)} converged',
-            'nfev': sum(r.nfev for r in local_results),
-        })()
 
-        # Collect all near-optimal solutions
-        equilibria = []
+        # Best result (min objective)
+        best_res = min(valid_results, key=lambda r: float(r.fun))
+        best_fun = float(best_res.fun)
+        best_effect = (-best_fun) if maximize else best_fun
 
-        # result.xl: local minimizers (y-variables); result.funl: objective values at those points
-        for y, val in zip(result.xl, result.funl):
-            # Convert y directly to intensities: intensity_i = y_i / cost_i
-            y_arr = np.asarray(y, dtype=float)
-            intensities = np.divide(y_arr, costs_array, out=np.zeros_like(y_arr), where=costs_array > 0)
+        # Warn if penalty might be too small relative to observed effect scales
+        # (user asked to flag this possibility)
+        if max_abs_effect is not None and max_abs_effect > 0.1 * penalty_value:
+            warnings.warn(
+                f"Observed |VOI| up to {max_abs_effect:.3g}, which is close to penalty_value={penalty_value:.3g}. "
+                "Consider increasing penalty_value to avoid failed evaluations appearing artificially attractive."
+            )
 
-            current_effect_size = (-val) if maximize else (val)
-
-            # Correct near-optimal test for both maximize and minimize
+        # Near-optimal selection threshold for effect size (primary criterion)
+        def near_optimal_effect(effect: float) -> bool:
+            tol = float(threshold_atol) + float(threshold_rtol) * abs(float(best_effect))
             if maximize:
-                near_opt = (best_effect_size - current_effect_size) <= threshold_effect
-            else:
-                near_opt = (current_effect_size - best_effect_size) <= threshold_effect
+                return (best_effect - effect) <= tol
+            return (effect - best_effect) <= tol
 
-            if near_opt:
-                intervention_dict = {
-                    name: round(float(intensity), 4)
-                    for name, intensity in zip(self.sdm.intervention_variables, intensities)
-                }
-                equilibria.append(
-                    {
-                        "interventions": intervention_dict,
-                        "intensities": intensities,
-                        "effect_size": round(float(current_effect_size), 6),
-                        "total_cost": round(float(np.dot(intensities, costs_array)), 4),
-                    }
+        # Build equilibria candidates from valid minimizers
+        candidates: List[Equilibrium] = []
+        for r in valid_results:
+            y = np.asarray(r.x, dtype=float)
+            y = np.clip(y, 0.0, float(budget))
+            # enforce sum constraint gently (numerical)
+            s = float(np.sum(y))
+            if s > budget * (1.0 + constraint_tol):
+                # project down to budget (simple scaling) to keep feasibility
+                y = y * (float(budget) / s)
+
+            intensities = y / costs_array
+            fun = float(r.fun)
+            effect = (-fun) if maximize else fun
+            if not np.isfinite(effect):
+                continue
+
+            # Primary filter: effect size within tolerance of best
+            if near_optimal_effect(effect):
+                candidates.append(
+                    Equilibrium(
+                        y=y,
+                        intensities=intensities,
+                        effect_size=float(effect),
+                        total_cost=float(np.sum(y)),
+                        fun=float(fun),
+                    )
                 )
 
-        # Sort by effect_size (descending)
-        equilibria.sort(key=lambda x: x["effect_size"], reverse=True)
+        # Secondary filter: total cost within tolerance of minimum cost among candidates
+        if len(candidates) > 0:
+            min_cost = min(c.total_cost for c in candidates)
+            candidates = [c for c in candidates if (c.total_cost - min_cost) <= cost_atol]
+
+        # Order candidates by effect size (best first), then by cost (lowest first)
+        candidates.sort(key=lambda e: (-e.effect_size if maximize else e.effect_size, e.total_cost))
+
+        # Dedupe by y-space distance
+        equilibria: List[Equilibrium] = []
+        for cand in candidates:
+            if self._is_new_equilibrium(cand.y, [e.y for e in equilibria], tol=y_dedupe_tol):
+                equilibria.append(cand)
+
+        # Prepare output equilibria dicts (full precision; no rounding)
+        equilibria_out: List[Dict[str, Any]] = []
+        for eq in equilibria:
+            intervention_dict = {
+                name: float(val)
+                for name, val in zip(self.sdm.intervention_variables, eq.intensities)
+            }
+            equilibria_out.append(
+                {
+                    "interventions": intervention_dict,
+                    "intensities": eq.intensities.copy(),
+                    "y": eq.y.copy(),
+                    "effect_size": float(eq.effect_size),
+                    "total_cost": float(eq.total_cost),
+                    "fun": float(eq.fun),
+                }
+            )
+
+        diag = OptimizationDiagnostics(
+            algorithm=algorithm,
+            budget=float(budget),
+            n_interventions=n_interventions,
+            n_starts_requested=int(n_starts),
+            n_starts_used=int(n_starts_used),
+            n_converged=int(sum(1 for r in per_start_results if bool(r.success))),
+            n_valid=int(len(valid_results)),
+            n_failed=int(n_starts_used - sum(1 for r in per_start_results if bool(r.success))),
+            total_nfev=int(sum(getattr(r, "nfev", 0) for r in per_start_results)),
+            total_nit=int(sum(getattr(r, "nit", 0) for r in per_start_results)),
+            exception_count=int(exception_count),
+            first_exception=first_exception,
+            max_abs_effect_observed=max_abs_effect,
+            penalty_value=float(penalty_value),
+            seed=seed,
+        )
 
         return {
-            "method": "global",
+            "method": algorithm,
             "success": True,
-            "n_equilibria": len(equilibria),
-            "equilibria": equilibria,
-            "best_effect_size": float(best_effect_size),
-            "optimization_result": result,
+            "n_equilibria": len(equilibria_out),
+            "equilibria": equilibria_out,
+            "best_effect_size": float(best_effect),
+            "best_intensities": (np.asarray(best_res.x, dtype=float) / costs_array),
+            "best_y": np.asarray(best_res.x, dtype=float),
+            "optimization_result": best_res,
+            "diagnostics": diag,
+            "per_start_results": per_start_results,
         }
 
-
-    def optimize_across_parameter_samples(self, costs, variable_of_interest=None, 
-                                         bounds=None, initial_guess=None, method='global',
-                                         threshold_effect=0.01, n_samples=None, maximize=True):
+    # ---------------------------------------------------------------------
+    # Parameter-sweep optimization
+    # ---------------------------------------------------------------------
+    def optimize_across_parameter_samples(
+        self,
+        costs: Union[np.ndarray, List[float]],
+        variable_of_interest: Optional[str] = None,
+        *,
+        n_parameter_samples: Optional[int] = None,
+        # optimization parameters forwarded
+        budget: float = 1.0,
+        maximize: bool = True,
+        n_starts: Optional[int] = None,
+        seed: Optional[int] = None,
+        sobol_power_of_two: bool = True,
+        threshold_atol: float = 0.01,
+        threshold_rtol: float = 0.0,
+        y_dedupe_tol: float = 1e-6,
+        slsqp_maxiter: int = 50,
+        slsqp_ftol: float = 1e-3,
+        penalty_value: float = 1e30,
+        debug: bool = False,
+        algorithm: str = "multistart_slsqp",
+        # mapping / output control
+        store_parameter_samples: bool = True,
+        return_parameter_samples: bool = False,
+        show_progress: bool = True,
+    ) -> Union[pd.DataFrame, Tuple[pd.DataFrame, List[Dict[str, Any]]]]:
         """
-        Run optimization across all parameter samples to get optimized intervention intensities per sample.
-        
-        Args:
-            costs (array-like): Relative cost for each intervention variable
-            variable_of_interest (str, optional): Variable to optimize for. If None, uses self.sdm.variable_of_interest[0]
-            bounds (list, optional): Bounds for intensities. Default: [0, 5]
-            initial_guess (array-like, optional): Initial guess for intensities (local method only)
-            method (str): Optimization method:
-                - 'local': L-BFGS-B local optimization
-                - 'global': SHGO with Sobol sampling
-            threshold_effect (float): For global method - threshold for near-optimal solutions. Default: 0.01
-            n_samples (int, optional): For global methods - controls population/sample size.
-                                      If None, automatically calculated based on dimensionality.
-            maximize (bool): If True, maximize the variable of interest; if False, minimize it. Default: True
-        
-        Returns:
-            pd.DataFrame: For local method - dataframe with columns:
-                - intensity_{intervention_var}: optimized intensity for each intervention
-                - voi_effect_size: optimal VOI value at final time
-                - optimization_success: whether optimization succeeded
-                - n_evaluations: number of objective function evaluations
-            
-            For global method - dataframe with columns:
-                - sample_idx: parameter sample index
-                - equilibrium_idx: index of equilibrium within that sample
-                - intensity_{intervention_var}: optimized intensity for each intervention
-                - voi_effect_size: VOI value at final time
-                - total_cost: total cost of intervention strategy
-                - n_equilibria: total number of equilibria found for this sample
+        Optimize across multiple parameter samples, returning a tidy DataFrame.
+
+        The mapping between sample_idx and parameter set can be preserved by:
+        - setting store_parameter_samples=True (default): stored in self._last_parameter_samples
+        - setting return_parameter_samples=True: returned alongside the DataFrame
+
+        Output DataFrame columns:
+        - sample_idx
+        - equilibrium_idx
+        - intensity_{intervention_var} (full precision)
+        - voi_effect_size
+        - total_cost
+        - n_equilibria
+        - success
         """
         if variable_of_interest is None:
             variable_of_interest = self.sdm.variable_of_interest[0]
-        
-        results = []
-        
-        for sample_idx in tqdm(range(self.sdm.N), desc=f"Optimizing across parameter samples ({method})"):
-            # Sample parameters for this sample
-            params = self.sdm.sample_model_parameters()
-            
-            # Run optimization
-            opt_result = self.optimize_intervention_intensities(
-                params, costs, variable_of_interest, bounds, initial_guess, 
-                method, threshold_effect, n_samples, maximize
+
+        if n_parameter_samples is None:
+            n_parameter_samples = int(getattr(self.sdm, "N", 1))
+
+        # Pre-sample parameters to ensure stable mapping sample_idx <-> params
+        params_list: List[Dict[str, Any]] = [self.sdm.sample_model_parameters() for _ in range(n_parameter_samples)]
+
+        if store_parameter_samples:
+            self._last_parameter_samples = params_list
+
+        iterator: Iterable[int]
+        if show_progress and tqdm is not None:
+            iterator = tqdm(range(n_parameter_samples), desc=f"Optimizing across parameter samples ({algorithm})")
+        else:
+            iterator = range(n_parameter_samples)
+
+        rows: List[Dict[str, Any]] = []
+        for sample_idx in iterator:
+            params = params_list[sample_idx]
+
+            opt = self.optimize_intervention_intensities(
+                params=params,
+                costs=costs,
+                variable_of_interest=variable_of_interest,
+                budget=budget,
+                maximize=maximize,
+                n_starts=n_starts,
+                seed=seed,
+                sobol_power_of_two=sobol_power_of_two,
+                threshold_atol=threshold_atol,
+                threshold_rtol=threshold_rtol,
+                y_dedupe_tol=y_dedupe_tol,
+                slsqp_maxiter=slsqp_maxiter,
+                slsqp_ftol=slsqp_ftol,
+                penalty_value=penalty_value,
+                debug=debug,
+                algorithm=algorithm,
             )
-            
-            if method == 'local':
-                # Store single optimum per sample
-                row = {}
-                for i, int_var in enumerate(self.sdm.intervention_variables):
-                    row[f'intensity_{int_var}'] = opt_result['optimized_intensities'][i]
-                row['voi_effect_size'] = opt_result['effect_size']
-                row['optimization_success'] = opt_result['success']
-                row['n_evaluations'] = opt_result['n_evaluations']
-                results.append(row)
-            
-            elif method == 'global':
-                # Store all equilibria for this sample
-                if opt_result['success']:
-                    for eq_idx, equilibrium in enumerate(opt_result['equilibria']):
-                        row = {'sample_idx': sample_idx, 'equilibrium_idx': eq_idx}
-                        for int_var, intensity in equilibrium['interventions'].items():
-                            row[f'intensity_{int_var}'] = intensity
-                        row['voi_effect_size'] = equilibrium['effect_size']
-                        row['total_cost'] = equilibrium['total_cost']
-                        row['n_equilibria'] = opt_result['n_equilibria']
-                        results.append(row)
-                else:
-                    # Record failure
-                    row = {'sample_idx': sample_idx, 'equilibrium_idx': -1}
-                    for int_var in self.sdm.intervention_variables:
-                        row[f'intensity_{int_var}'] = np.nan
-                    row['voi_effect_size'] = np.nan
-                    row['total_cost'] = np.nan
-                    row['n_equilibria'] = 0
-                    results.append(row)
-        
-        # Convert to dataframe
-        df_results = pd.DataFrame(results)
-        
-        return df_results
+
+            if opt.get("success", False):
+                equilibria = opt["equilibria"]
+                n_eq = int(opt["n_equilibria"])
+                for eq_idx, eq in enumerate(equilibria):
+                    row: Dict[str, Any] = {
+                        "sample_idx": int(sample_idx),
+                        "equilibrium_idx": int(eq_idx),
+                        "voi_effect_size": float(eq["effect_size"]),
+                        "total_cost": float(eq["total_cost"]),
+                        "n_equilibria": int(n_eq),
+                        "success": True,
+                    }
+                    # Flatten nested parameter dict: param_{var}__{param}
+                    for var, param_dict in params.items():
+                        for pname, pval in param_dict.items():
+                            # Handle custom equation parameters (dict or array)
+                            if pname.startswith('__eq_params_') and isinstance(pval, dict):
+                                for eqk, eqv in pval.items():
+                                    row[f"param_{var}__{pname}__{eqk}"] = eqv
+                            elif pname.startswith('__eq_params_') and hasattr(pval, '__iter__') and not isinstance(pval, str):
+                                for i, eqv in enumerate(pval):
+                                    row[f"param_{var}__{pname}__{i}"] = eqv
+                            else:
+                                row[f"param_{var}__{pname}"] = pval
+                    # full precision intensities
+                    for name, val in eq["interventions"].items():
+                        row[f"intensity_{name}"] = float(val)
+                    rows.append(row)
+            else:
+                row = {
+                    "sample_idx": int(sample_idx),
+                    "equilibrium_idx": -1,
+                    "voi_effect_size": np.nan,
+                    "total_cost": np.nan,
+                    "n_equilibria": 0,
+                    "success": False,
+                }
+                # Flatten nested parameter dict: param_{var}__{param}
+                for var, param_dict in params.items():
+                    for pname, pval in param_dict.items():
+                        # Handle custom equation parameters (dict or array)
+                        if pname.startswith('__eq_params_') and isinstance(pval, dict):
+                            for eqk, eqv in pval.items():
+                                row[f"param_{var}__{pname}__{eqk}"] = eqv
+                        elif pname.startswith('__eq_params_') and hasattr(pval, '__iter__') and not isinstance(pval, str):
+                            for i, eqv in enumerate(pval):
+                                row[f"param_{var}__{pname}__{i}"] = eqv
+                        else:
+                            row[f"param_{var}__{pname}"] = pval
+                for name in self.sdm.intervention_variables:
+                    row[f"intensity_{name}"] = np.nan
+                rows.append(row)
+
+        df = pd.DataFrame(rows)
+
+        if return_parameter_samples:
+            return df, params_list
+        return df
+
+    def get_last_parameter_samples(self) -> Optional[List[Dict[str, Any]]]:
+        """Retrieve the last set of parameter samples used by optimize_across_parameter_samples()."""
+        return self._last_parameter_samples
+
+    # ---------------------------------------------------------------------
+    # Helpers
+    # ---------------------------------------------------------------------
+    @staticmethod
+    def _next_power_of_two(k: int) -> int:
+        if k <= 1:
+            return 1
+        return 1 << (k - 1).bit_length()
+
+    @staticmethod
+    def _sobol_to_simplex_y(u: np.ndarray, *, budget: float) -> np.ndarray:
+        """
+        Map Sobol points u in [0,1]^(d+1) to feasible y in simplex sum(y) <= budget.
+
+        Construction:
+        - Dirichlet(1,...,1) via normalized -log(u_dir) (sum=1)
+        - Radial scaling r = u_rad^(1/d) for uniform volume in simplex
+        """
+        u = np.asarray(u, dtype=float)
+        if u.ndim != 2 or u.shape[1] < 2:
+            raise ValueError("u must be 2D with at least 2 columns (d+1).")
+
+        d_plus_1 = u.shape[1]
+        d = d_plus_1 - 1
+        u_dir = u[:, :d]
+        u_rad = u[:, d]
+
+        # avoid log(0)
+        eps = np.finfo(float).tiny
+        u_dir = np.clip(u_dir, eps, 1.0)
+        u_rad = np.clip(u_rad, eps, 1.0)
+
+        z = -np.log(u_dir)
+        z_sum = np.sum(z, axis=1, keepdims=True)
+        # Dirichlet (uniform on simplex sum=1)
+        dirichlet = z / z_sum
+
+        # Uniform-in-volume scaling to sum<=budget simplex
+        scale = (u_rad ** (1.0 / d)) * float(budget)
+        y = dirichlet * scale[:, None]
+        return y
+
+    @staticmethod
+    def _is_new_equilibrium(y: np.ndarray, ys_kept: List[np.ndarray], *, tol: float) -> bool:
+        if len(ys_kept) == 0:
+            return True
+        y = np.asarray(y, dtype=float)
+        for yk in ys_kept:
+            if np.linalg.norm(y - np.asarray(yk, dtype=float)) <= tol:
+                return False
+        return True

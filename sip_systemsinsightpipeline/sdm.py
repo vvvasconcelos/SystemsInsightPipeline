@@ -97,22 +97,16 @@ class SDM:
         """Run the SDM with intervention intensities. See SDMOptimizer for full documentation."""
         return self._get_optimizer().run_SDM_with_intervention_intensities(intervention_intensities, params)
     
-    def optimize_intervention_intensities(self, params, costs, variable_of_interest=None, 
-                                         bounds=None, initial_guess=None, method='global',
-                                         threshold_effect=0.01, n_samples=None, maximize=True):
-        """Optimize intervention intensities. See SDMOptimizer for full documentation."""
+    def optimize_intervention_intensities(self, params, costs, variable_of_interest=None, **kwargs):
+        """Optimize intervention expenditures under a budget. See SDMOptimizer for full documentation."""
         return self._get_optimizer().optimize_intervention_intensities(
-            params, costs, variable_of_interest, bounds, initial_guess, 
-            method, threshold_effect, n_samples, maximize
+            params, costs, variable_of_interest, **kwargs
         )
-    
-    def optimize_across_parameter_samples(self, costs, variable_of_interest=None, 
-                                         bounds=None, initial_guess=None, method='global',
-                                         threshold_effect=0.01, n_samples=None, maximize=True):
+
+    def optimize_across_parameter_samples(self, costs, variable_of_interest=None, **kwargs):
         """Optimize across parameter samples. See SDMOptimizer for full documentation."""
         return self._get_optimizer().optimize_across_parameter_samples(
-            costs, variable_of_interest, bounds, initial_guess, 
-            method, threshold_effect, n_samples, maximize
+            costs, variable_of_interest, **kwargs
         )
 
     def run_simulations(self, progress_callback=None):
