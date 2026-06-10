@@ -237,7 +237,8 @@ class Extract:
         #self.variables = [re.sub(r'[^a-zA-Z0-9_\s]', '', var).strip() for var in self.original_variables]
         #self.variables = [" ".join(var.split()) for var in self.variables]
         self.variables = [" ".join(var.split()) for var in self.original_variables] # Just remove extra spaces
-        self.var_to_type = dict(zip(self.variables, list(df_e["Type"])))  # Create dictionary with relevant labels
+        # Create dictionary with relevant labels; normalize case so "Stock"/"stock" in the Excel are equivalent
+        self.var_to_type = dict(zip(self.variables, [str(t).strip().lower() for t in df_e["Type"]]))
         self.original_to_cleaned_var = dict(zip(self.original_variables, self.variables))
 
         ### Assign stock or constant to variables without type
