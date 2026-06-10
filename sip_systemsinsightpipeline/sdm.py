@@ -6,8 +6,6 @@ import scipy
 from copy import deepcopy
 from tqdm import tqdm 
 from tabulate import tabulate
-from sympy.parsing.sympy_parser import parse_expr
-import sympy as sym
 
 class SDM:
     def __init__(self, s):

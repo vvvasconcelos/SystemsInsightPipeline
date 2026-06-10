@@ -2,26 +2,38 @@ from setuptools import setup, find_packages
 
 setup(
     name='sip_systemsinsightpipeline',
-    version='0.1.5',
-    packages=find_packages(),
+    version='0.2.0',
+    description=(
+        'Systems Insight Pipeline (SIP): convert causal loop diagrams from Kumu '
+        'Excel exports into computational system dynamics models; simulate, '
+        'optimize, and analyze interventions under uncertainty.'
+    ),
+    long_description=open('README.md', encoding='utf-8').read(),
+    long_description_content_type='text/markdown',
+    url='https://github.com/vvvasconcelos/SystemsInsightPipeline',
+    author='Vítor V. Vasconcelos',
+    author_email='v.v.vasconcelos@uva.nl',
+    license='GPL-3.0-or-later',
+    python_requires='>=3.9',
+    packages=find_packages(exclude=('tests',)),
     install_requires=[
+        'numpy',
         'pandas>=1.3.0',
-        'openpyxl>=3.1.0',
+        'scipy>=1.7',
+        'matplotlib>=3.5',
         'seaborn>=0.11.0',
-        'xlsxwriter>=3.0.5',
-        'scipy',
+        'networkx>=2.5',
+        'openpyxl>=3.1.0',
         'tqdm',
-        'sympy',
-        'networkx',
-        'networkx >= 2.5',
-        'ipywidgets',
-        'numexpr>=2.8.4',
-        'bottleneck>=1.3.6',
-        'tabulate>=0.8.9'
+        'tabulate>=0.8.9',
     ],
-    entry_points={
-        'console_scripts': [
-            # Define any scripts or entry points for command-line use
+    extras_require={
+        'dev': [
+            'pytest',
+            'nbformat',
+            'nbclient',
+            'jupyter',
+            'ipykernel',
         ],
     },
 )
