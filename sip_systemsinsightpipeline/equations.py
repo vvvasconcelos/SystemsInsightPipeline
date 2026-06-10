@@ -321,33 +321,8 @@ class EquationEvaluator:
             'sigmoid': lambda x: 1 / (1 + np.exp(-x)),
         }
     
-#    def sample_equation_parameters(self, var_name: str) -> np.ndarray:
-#        """
-#        Sample parameters for a variable's equation.
-#        
-#        Args:
-#            var_name: Name of the variable
-#            
-#        Returns:
-#            Array of sampled parameter values (all positive)
-#        """
-#        if var_name not in self.equations:
-#            return np.array([])
-#        
-#        eq_info = self.equations[var_name]
-#        n_params = eq_info['n_parameters']
-#        
-#        if n_params == 0:
-#            return np.array([])
-#        
-#        # Sample from uniform distribution in positive range
-#        return np.random.uniform(
-#            self.parameter_range[0], 
-#            self.parameter_range[1], 
-#            size=n_params
-#        )
-
     def sample_equation_parameters(self, var_name: str) -> dict:
+        """Sample a value for each #-parameter of a variable's equation, keyed by parameter label."""
         if var_name not in self.equations:
             return {}
         eq_info = self.equations[var_name]

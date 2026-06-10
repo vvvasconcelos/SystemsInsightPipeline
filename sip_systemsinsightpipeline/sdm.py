@@ -56,12 +56,6 @@ class SDM:
 
         stock_indices = [s.variables.index(stock) for stock in self.stocks]
         aux_indices = [s.variables.index(aux) for aux in self.auxiliaries]
-        # self.num_pars_int_stocks = int(self.interactions_matrix[np.ix_(stock_indices,
-        #                                                            np.arange(self.interactions_matrix.shape[1]),
-        #                                                            np.arange(self.interactions_matrix.shape[2]))].sum().sum())
-        # self.num_pars_int_auxiliaries = int(self.interactions_matrix[np.ix_(aux_indices,
-        #                                                                 np.arange(self.interactions_matrix.shape[1]),
-        #                                                                 np.arange(self.interactions_matrix.shape[2]))].sum().sum())
 
         self.num_pars_int_stocks = int(np.count_nonzero(self.interactions_matrix[np.ix_(stock_indices,
                                             np.arange(self.interactions_matrix.shape[1]),
@@ -109,7 +103,7 @@ class SDM:
             costs, variable_of_interest, **kwargs
         )
 
-    def run_simulations(self, progress_callback=None):
+    def run_simulations(self):
         """ Run the simulations for N iterations for all the specified interventions
         (PATCHED: remove link parameters for variables with custom equations as early as possible) """
         df_sol_per_sample = []  # List for storing the solution dataframes
@@ -191,10 +185,6 @@ class SDM:
 
             df_sol_per_sample += [df_sol]
 
-            # If a progress callback is provided, update progress (for Streamlit app)
-            # if progress_callback:
-            #     progress_callback(num + 1, self.N)
-
         self.df_sol_per_sample = df_sol_per_sample
         self.param_samples = param_samples
         return df_sol_per_sample, param_samples
@@ -203,9 +193,6 @@ class SDM:
         """ Run the SDM and return a dataframe with all the variables at every time step, including auxiliaries.
         """
         if self.interaction_terms:
-            # solution = solve_ivp(self.solve_sdm, self.t_span, x0, args=(A, K, b),
-            #                     t_eval=self.t_eval, jac=self.jac,
-            #                     method=self.solver, rtol=1e-6, atol=1e-6).y.T
             solution = solve_ivp(self.dz_dt_int, self.t_span, x0, args=(constants_values, params),
                                  t_eval=self.t_eval, method=self.solver, rtol=1e-6, atol=1e-6).y.T       
         else:  # Linear system
@@ -578,13 +565,6 @@ class SDM:
                                     params[var][var_2 + " * " + var_3] = self.interactions_matrix[i, j, k] * sample_pars_int_auxiliaries[par_int_count_auxiliaries]
                                     par_int_count_auxiliaries += 1 
         
-        # Sample parameters for custom equations
-        #if self._equation_evaluator:
-        #    for var in self.stocks_and_auxiliaries:
-        #        if self._equation_evaluator.has_custom_equation(var):
-        #            eq_params = self._equation_evaluator.sample_equation_parameters(var)
-        #            params[var][f'__eq_params_{var}__'] = eq_params
-        
         self.params = params
         return params
 
@@ -603,8 +583,6 @@ class SDM:
                                    t_eval=self.t_eval, jac=self.jac_linear,
                                    method=self.solver, rtol=1e-6, atol=1e-6).y.T
 
-            # A_inv = np.linalg.pinv(A)  # Pseudo-inverse for singular matrices
-
         I = np.identity(A.shape[0])
         A_inv_b = np.matmul(A_inv, b)
 
@@ -616,17 +594,6 @@ class SDM:
             sol[i + 1, :] = np.matmul(exp_At, x0) + np.matmul((exp_At - I), A_inv_b)
         return sol
 
-    def solve_sdm(self, t, x, A, K, b):
-        """ Solve the system of differential equations representing the SDM.
-        x: vector containing the stock and constant variables
-        A: matrix of coefficients for the linear terms of len(x) in both dimensions.
-        K: 3rd order tensor of coefficients for the interaction terms of len(x) in all three dimensions.
-        Outputs the derivative of x.
-        """
-        Kx = np.matmul(K, x) 
-        dx_dt = np.matmul(A, x) + np.matmul(Kx, x) + b
-        return dx_dt
-
     def solve_sdm_linear(self, t, x, A, b):
         """ Solve the linear system of differential equations representing the SDM.
         x: vector containing the stock and constant variables
@@ -635,11 +602,6 @@ class SDM:
         """
         dx_dt = np.matmul(A, x) + b
         return dx_dt
-
-    def jac(self, t, x, A, K, b):
-        """ Jacobian matrix, depends on A and K, not b (which is a constant vector)
-        """
-        return A + 2 * np.matmul(K, x)
 
     def jac_linear(self, t, x, A, b):
         """ Jacobian matrix is equal to A for linear systems
