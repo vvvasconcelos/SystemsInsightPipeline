@@ -503,10 +503,11 @@ class SDM:
         par_int_count_stocks = 0
         par_int_count_auxiliaries = 0
     
-        for i, var in enumerate(self.stocks_and_auxiliaries):
-            # Intercept
-            if var in self.stocks_and_auxiliaries:
-                params[var]["Intercept"] = 0
+        for var in self.stocks_and_auxiliaries:
+            # The interactions matrix is indexed by position in self.variables, which differs
+            # from the position in stocks_and_auxiliaries once constants interleave with them
+            i = self.variables.index(var)
+            params[var]["Intercept"] = 0
 
             # If this variable has a custom equation, add custom equation parameters, but also ensure all incoming links are present for dependency sorting
             if self._equation_evaluator and self._equation_evaluator.has_custom_equation(var):
