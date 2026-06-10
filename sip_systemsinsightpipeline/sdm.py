@@ -41,7 +41,7 @@ class SDM:
         self.equation_warnings = getattr(s, 'equation_warnings', [])
         self._equation_evaluator = None
         if self.equations:
-            from systemdynamics.equations import EquationEvaluator
+            from .equations import EquationEvaluator
             # Use parameter_value_aux as the default range for custom equation parameters
             self._equation_evaluator = EquationEvaluator(
                 self.equations, 
@@ -82,14 +82,14 @@ class SDM:
     # =========================================================================
     # Backward-compatible optimization methods (delegate to SDMOptimizer)
     # For new code, prefer using SDMOptimizer directly:
-    #   from systemdynamics.optimizer import SDMOptimizer
+    #   from sip_systemsinsightpipeline.optimizer import SDMOptimizer
     #   optimizer = SDMOptimizer(sdm)
     # =========================================================================
     
     def _get_optimizer(self):
         """Lazily create and cache an SDMOptimizer instance."""
         if not hasattr(self, '_optimizer'):
-            from systemdynamics.optimizer import SDMOptimizer
+            from .optimizer import SDMOptimizer
             self._optimizer = SDMOptimizer(self)
         return self._optimizer
     

@@ -1,9 +1,9 @@
 import streamlit as st
 from tempfile import TemporaryDirectory
 import os
-from systemdynamics.cld import Extract
-from systemdynamics.sdm import SDM
-from systemdynamics.plots import plot_simulated_intervention_ranking
+from sip_systemsinsightpipeline.cld import Extract
+from sip_systemsinsightpipeline.sdm import SDM
+from sip_systemsinsightpipeline.plots import plot_simulated_intervention_ranking
 import sys
 import io
 st.title('Diagrams-to-Dynamics (D2D): Exploring Causal Loop Diagram Leverage Points under Uncertainty')

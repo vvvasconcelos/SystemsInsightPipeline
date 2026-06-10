@@ -340,7 +340,7 @@ class Extract:
         Validates equations against incoming links and prepares them for evaluation.
         Uses # symbol for parameters (positive range) and supports np.FUNCTION syntax.
         """
-        from systemdynamics.equations import EquationParser
+        from .equations import EquationParser
         
         parser = EquationParser(self.variables)
         
