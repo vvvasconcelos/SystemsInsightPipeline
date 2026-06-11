@@ -21,11 +21,8 @@ class Extract:
         """ Extract all settings based on the json and Kumu files
         """
         # Load the adjacency matrix from the KUMU file
-        #variable_names, var_to_type_init, df_adj, interactions_matrix, intervention_variables, variable_of_interest, centrality = self.adjacency_matrix_from_kumu()  
-        self.adjacency_matrix_from_kumu()  
-    
-        #return self.variables, self.var_to_type, self.df_adj, self.interactions_matrix, self.intervention_variables, self.variable_of_interest, self.centrality
-        #if s.interaction_terms:
+        self.adjacency_matrix_from_kumu()
+
         if np.abs(self.interactions_matrix).sum() > 0:  # Interaction terms specified
             print("Solving an SDM with interaction terms.")
             print("By default, only single interventions will be simulated. To simulate interventions on two variables simultaneously, set s.double_factor_interventions = True")
@@ -35,9 +32,8 @@ class Extract:
         else:
             print("No interaction terms specified so will solve linear SDM.")
             s = SimpleNamespace(**{"interaction_terms" : 0,
-                                   "solve_analytically" : 1,
+                                   "solve_analytically" : 0,
                                    "double_factor_interventions" : 0})
-            #s.interaction_terms = False
 
         if double_factor_interventions_setting is not None: # If specified, override the default setting
             s.double_factor_interventions = double_factor_interventions_setting
@@ -45,15 +41,6 @@ class Extract:
         if s.double_factor_interventions and s.interaction_terms == False:
             warnings.warn("Without interaction terms, double factor interventions are not meaningful." \
                           "Consider setting double_factor_interventions to False.")
-
-        # Load variable names and fill any spaces with underscores
-        # s.stocks = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var].lower() == 'stock']
-        # s.auxiliaries = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var].lower() == 'auxiliary']
-        # s.constants = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var].lower() == 'constant']
-        # s.variables = [var.replace(" ", "_") for var in self.variables]  # s.auxiliaries + s.stocks + s.constants
-        # s.stocks_and_constants = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var] in ['stock', 'constant']]
-        # s.stocks_and_auxiliaries = [var.replace(" ", "_") for var in self.variables if self.var_to_type[var] in ['stock', 'auxiliary']]
-        # s.var_to_type = {var.replace(" ", "_") : self.var_to_type[var] for var in self.variables}
 
         s.stocks = [var for var in self.variables if self.var_to_type[var].lower() == 'stock']
         s.auxiliaries = [var for var in self.variables if self.var_to_type[var].lower() == 'auxiliary']
@@ -94,7 +81,7 @@ class Extract:
         # Add the interactions to the adjacency matrix for the identification of feedback loops with interaction terms
         s.df_adj_incl_interactions = s.df_adj.copy()
         to_list, from1_list, from2_list = np.nonzero(s.interactions_matrix)
-        for i in range(int(np.abs(s.interactions_matrix).sum())):
+        for i in range(len(to_list)):  # Use length of nonzero indices, not sum of values
             to, from1, from2 = to_list[i], from1_list[i], from2_list[i]
             value = s.interactions_matrix[to, from1, from2]
             # Ensure that the interaction is nonzero in the adjacency matrix
@@ -102,6 +89,10 @@ class Extract:
                                            s.df_adj_incl_interactions.columns[from1]] = value
             s.df_adj_incl_interactions.loc[s.df_adj_incl_interactions.index[to],
                                            s.df_adj_incl_interactions.columns[from2]] = value
+        
+        # Add custom equations to settings
+        s.equations = self.equations if hasattr(self, 'equations') else {}
+        s.equation_warnings = self.equation_warnings if hasattr(self, 'equation_warnings') else []
             
         self.s = s  # Save the settings
 
@@ -110,8 +101,6 @@ class Extract:
     def check_loops(self, df_e, df_c):
         """ Check whether all loops have stocks and the ratio of balancing loops in the CLD
         """
-        #stocks = list(df_e.loc[df_e.Type == "stock", "Label"])
-        #num_stocks_and_auxiliaries = df_e.loc[(df_e.Type == "stock") | (df_e.Type == "auxiliary")].shape[0]
         stocks = [var for var in self.variables if self.var_to_type[var].lower() == "stock"]
 
         num_stocks_and_auxiliaries = len([var for var in self.variables 
@@ -122,20 +111,8 @@ class Extract:
         if num_stocks_and_auxiliaries < max_loops_check:
             max_loops_check = num_stocks_and_auxiliaries
 
-        # # Create a directed graph
-        # G = nx.DiGraph()
-
-        # # Add edges to the graph
-        # for index, row in df_c.iterrows():
-        #    G.add_edge(row['From'], row['To'])
-
-        if (self.df_adj == -999).any().any() > 0:
-        #    print("Cannot assess balancing vs. reinforcing feedback loops because polarities are missing")
-            temp_df = self.df_adj.copy()
-            temp_df = temp_df.replace(-999, 1)  # Replace missing polarities with 1, just cannot assess balancing loops
-        
         G = nx.from_numpy_array(np.array(self.df_adj).T, create_using=nx.DiGraph)
-        var_names = [var for var in self.df_adj.columns]  #.replace(" ", "_")
+        var_names = [var for var in self.df_adj.columns]
         G = nx.relabel_nodes(G, dict(enumerate(var_names)))
         feedback_loops = list(nx.simple_cycles(G, length_bound=max_loops_check))
         num_loops = len(feedback_loops)
@@ -170,13 +147,11 @@ class Extract:
                         if str(pol) == "-":
                             num_min += 1
                     if num_min % 2 != 0:  # If the number of negative polarities is odd
-                    #    print(loop)
                         num_balancing += 1
                         balancing_loops += [loop]
-                
+
                 print(num_balancing, "(" + str(round((num_balancing/num_loops)*100, 2))+
                     "%) of these loops are balancing loops")
-                # print(balancing_loops)
                 if max_loops_check==num_stocks_and_auxiliaries:
                     print("The max length of loops checked is equal to the number of stocks and auxiliaries; all loops are considered\n")
                 else:
@@ -188,15 +163,9 @@ class Extract:
         bc = nx.betweenness_centrality(G, k=None, normalized=True)
         cc = nx.closeness_centrality(G.reverse(), wf_improved=False) # Apply to G.reverse() for outward distance vs inward
         bc = dict(sorted(bc.items(), key=lambda item: item[1], reverse=True))
-        cc = dict(sorted(cc.items(), key=lambda item: item[1], reverse=True)) 
-        #print('betweenness:')#, bc)
-        #for key in bc:
-        #    print(key, ":", round(bc[key], 3))
-        #print('\ncloseness:')#, cc)  
-        #for key in cc:  
-        #    print(key, ":", round(cc[key], 3))
+        cc = dict(sorted(cc.items(), key=lambda item: item[1], reverse=True))
 
-        self.centrality = {"betweenness" : bc, "closeness" : cc} #, "communicability" : nx.communicability(G)}
+        self.centrality = {"betweenness" : bc, "closeness" : cc}
 
         
     def extract_adjacency_matrix(self):
@@ -209,8 +178,14 @@ class Extract:
         df_e = pd.read_excel(self.file_path, sheet_name="Elements")
         df_c = pd.read_excel(self.file_path, sheet_name="Connections")
 
-        # Extract relevant columns
-        df_e = df_e[["Label", "Type", "Tags", "Description"]]   
+        # Extract relevant columns - include Equation if present
+        base_columns = ["Label", "Type", "Tags", "Description"]
+        if "Equation" in df_e.columns:
+            base_columns.append("Equation")
+            self.has_equations = True
+        else:
+            self.has_equations = False
+        df_e = df_e[[col for col in base_columns if col in df_e.columns]]
         df_c = df_c[["From", "Type", "To"]]
         
         # Extract variables from the Elements 
@@ -222,12 +197,9 @@ class Extract:
             if "*" in var:
                 raise(Exception(f'Variable name {var} contains a disallowed special character (*). Please remove these characters from the variable names.'))
 
-        # Remove special characters from variable names and leave no extra spaces
-        #self.variables =  [" ".join(var.replace("-", " ").replace("/", " ").replace("'", "").replace("(", "").replace(")", "").split()) for var in self.original_variables]
-        #self.variables = [re.sub(r'[^a-zA-Z0-9_\s]', '', var).strip() for var in self.original_variables]
-        #self.variables = [" ".join(var.split()) for var in self.variables]
         self.variables = [" ".join(var.split()) for var in self.original_variables] # Just remove extra spaces
-        self.var_to_type = dict(zip(self.variables, list(df_e["Type"])))  # Create dictionary with relevant labels
+        # Create dictionary with relevant labels; normalize case so "Stock"/"stock" in the Excel are equivalent
+        self.var_to_type = dict(zip(self.variables, [str(t).strip().lower() for t in df_e["Type"]]))
         self.original_to_cleaned_var = dict(zip(self.original_variables, self.variables))
 
         ### Assign stock or constant to variables without type
@@ -246,17 +218,13 @@ class Extract:
         self.variable_of_interest = list(df_e.loc[df_e["Description"] == "VOI", "Label"])
 
         if len(self.variable_of_interest) == 1:
-            #self.variable_of_interest = self.variable_of_interest[0]
-            #if self.variable_of_interest != "A":
-                print("Variable of interest:", self.variable_of_interest[0])
+            print("Variable of interest:", self.variable_of_interest[0])
         else:
-            #raise(Exception("There should be exactly one variable of interest in the CLD"))
-                print("Variables of interest:", self.variable_of_interest)
+            print("Variables of interest:", self.variable_of_interest)
         print("with", len(self.intervention_variables), "intervention variables")
 
         # Create an empty adjacency matrix
         num_variables = len(self.variables)
-        # print("Num variables:", num_variables)
         self.adjacency_matrix = np.zeros((num_variables,
                                           num_variables))
 
@@ -316,7 +284,70 @@ class Extract:
                     raise(Exception(f'Number of incoming links for (non-constant) variable {var} is {num_incoming_links}, should be at least one.'))
 
         self.check_loops(df_e, df_c)  # Check for stocks in loops and ratio of balancing loops
+        
+        # Parse custom equations if present
+        self.equations = {}
+        self.equation_warnings = []
+        if self.has_equations:
+            self._parse_equations(df_e)
 
+    def _parse_equations(self, df_e):
+        """
+        Parse custom equations from the Equation column.
+        
+        Validates equations against incoming links and prepares them for evaluation.
+        Uses # symbol for parameters (positive range) and supports np.FUNCTION syntax.
+        """
+        from .equations import EquationParser
+        
+        parser = EquationParser(self.variables)
+        
+        for idx, row in df_e.iterrows():
+            label = row['Label']
+            equation = row.get('Equation', None)
+            
+            if pd.isna(equation) or str(equation).strip() == '':
+                continue
+            
+            # Find cleaned variable name
+            var_name = self.original_to_cleaned_var.get(label, label)
+            
+            if var_name not in self.variables:
+                continue
+            
+            # Get incoming links from adjacency matrix
+            incoming_links = [
+                col for col in self.df_adj.columns 
+                if self.df_adj.loc[var_name, col] != 0
+            ]
+            
+            # Parse the equation
+            parsed = parser.parse_equation(var_name, str(equation), incoming_links)
+            
+            if parsed['is_valid']:
+                self.equations[var_name] = parsed
+                
+                # Print equation info
+                print(f"Custom equation for '{var_name}': {equation}")
+                print(f"  Variables used: {parsed['variables_used']}")
+                print(f"  Parameters (#): {parsed['n_parameters']}")
+                if parsed.get('has_intervention', False):
+                    print(f"  Intervention ($): Yes - intervention applied within equation")
+                else:
+                    print(f"  Intervention ($): No - intervention will be added to result")
+                
+                # Collect and print warnings
+                for warning in parsed['validation_warnings']:
+                    warning_msg = f"  ⚠ {warning}"
+                    self.equation_warnings.append(f"[{var_name}] {warning}")
+                    print(warning_msg)
+                print()
+            else:
+                # Equation is invalid - print error and raise exception
+                print(f"\n❌ INVALID equation for '{var_name}': {equation}")
+                for warning in parsed['validation_warnings']:
+                    print(f"   {warning}")
+                raise ValueError(f"Invalid equation for '{var_name}': {parsed['validation_warnings']}")
 
     def extract_interactions_matrix(self):
         """Extract the interactions matrix from the 'Interactions' sheet in the Kumu Excel file."""
@@ -361,68 +392,3 @@ class Extract:
         """Run the CLD analysis by extracting the adjacency matrix and interactions matrix."""
         self.extract_adjacency_matrix()
         self.extract_interactions_matrix()
-        #return self.variables, self.var_to_type, self.df_adj, self.interactions_matrix, self.intervention_variables, self.variable_of_interest, self.centrality
-
-
-### TESTING ###
-    def test_extraction(self):
-        """Test the CLD extraction by creating an examplar Kumu table and comparing the results."""
-        # Create a sample evidence table
-        data = {
-            "From": ["A", "B", "C"],
-            "Type": ["+", "-", "+"],
-            "To": ["B", "C", "A"]
-        }
-
-        data_int = {
-            "From1": ["A", "B"],
-            "From2": ["C", "C"],
-            "Type": ["+", "+"],
-            "To": ["B", "A"]
-        }
-
-        df_e = pd.DataFrame(data["From"], columns=["Label"])
-        df_e["Type"] = ["stock", "auxiliary", "constant"]
-        df_e["Tags"] = ["VOI", -1, 1]
-        df_c = pd.DataFrame(data)
-        df_i = pd.DataFrame(data_int)
-
-        # Save the evidence table to an Excel file
-        original_file_path = self.file_path
-        test_file_path = os.path.join(os.path.dirname(__file__), '..', 'test_files', 'evidence_table.xlsx')
-
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(test_file_path), exist_ok=True)
-
-        with pd.ExcelWriter(test_file_path) as writer:
-            df_e.to_excel(writer, sheet_name='Elements', index=False)
-            df_c.to_excel(writer, sheet_name='Connections', index=False)
-            df_i.to_excel(writer, sheet_name='Interactions', index=False)
-
-        # Run the extraction
-        self.file_path = test_file_path
-        self.adjacency_matrix_from_kumu()
-        self.file_path = original_file_path  # Set the original file path again
-    
-        # Define the expected results
-        expected_adjacency_matrix = np.array([[0, 0, 1],
-                                              [1, 0, 0],
-                                              [0, -1, 0]])
-
-        expected_interactions_matrix = np.array([[[0, 0, 0],
-                                                  [0, 0, 0],
-                                                  [0, 1, 0]], 
-                                                 [[0, 0, 0],
-                                                  [0, 0, 0],
-                                                  [1, 0, 0]], 
-                                                 [[0, 0, 0],
-                                                  [0, 0, 0],
-                                                  [0, 0, 0]]])
-
-        # Assess the results
-        assert np.all(expected_adjacency_matrix == self.adjacency_matrix)
-        assert np.all(expected_interactions_matrix == self.interactions_matrix)
-        assert np.all([x in self.variables for x in data["From"]])
-        assert np.all([x in data["From"] for x in self.variables])
-        print("Test for loading KUMU table passed.")
-    

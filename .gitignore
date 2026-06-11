@@ -60,9 +60,9 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
-# Tutorials
-tutorials/Alzheimer_nolabel.ipynb
-tutorials/Alzheimer_nolabel.xlsx
+# Local-only artifacts
+original_paper/
+*.pkl
 
 # Translations
 *.mo

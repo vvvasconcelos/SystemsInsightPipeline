@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Systems Insight Pipeline (SIP)</title>
+<meta name="description" content="From a causal loop diagram in Excel to quantitative, decision-ready insight: simulation under uncertainty, intervention ranking, budget optimization, and feedback-loop analysis.">
+<style>
+  :root {
+    --ink: #1c2733;
+    --muted: #5a6b7b;
+    --accent: #21618c;
+    --accent-soft: #eaf2f8;
+    --card: #ffffff;
+    --bg: #f5f7fa;
+    --border: #dde4ec;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.6;
+  }
+  header {
+    background: linear-gradient(135deg, #1a5276, #21618c 60%, #2980b9);
+    color: #fff;
+    padding: 3.5rem 1.5rem 3rem;
+    text-align: center;
+  }
+  header h1 { margin: 0 0 0.4rem; font-size: 2.4rem; letter-spacing: 0.5px; }
+  header p.tagline { margin: 0 auto 1.6rem; max-width: 46rem; font-size: 1.2rem; color: #d6e6f2; }
+  .buttons a {
+    display: inline-block;
+    margin: 0.25rem;
+    padding: 0.6rem 1.3rem;
+    border-radius: 6px;
+    text-decoration: none;
+    font-weight: 600;
+  }
+  .btn-primary { background: #fff; color: var(--accent); }
+  .btn-ghost { border: 1.5px solid #ffffffaa; color: #fff; }
+  main { max-width: 60rem; margin: 0 auto; padding: 2.5rem 1.5rem 1rem; }
+  h2 { color: var(--accent); margin-top: 2.6rem; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: 1rem; margin-top: 1.2rem; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.1rem 1.2rem;
+  }
+  .card h3 { margin: 0 0 0.4rem; font-size: 1.02rem; color: var(--ink); }
+  .card p { margin: 0; font-size: 0.93rem; color: var(--muted); }
+  .workflow { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; margin-top: 1.2rem; }
+  .step {
+    background: var(--accent-soft);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.45rem 1rem;
+    font-size: 0.92rem;
+    font-weight: 600;
+    color: var(--accent);
+  }
+  .arrow { color: var(--muted); font-weight: 700; }
+  figure { margin: 1.4rem 0; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+  figure img { width: 100%; height: auto; border-radius: 6px; }
+  figcaption { font-size: 0.9rem; color: var(--muted); margin-top: 0.6rem; }
+  .figures { display: grid; grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); gap: 1rem; }
+  pre {
+    background: #102a3c;
+    color: #e8f1f8;
+    border-radius: 10px;
+    padding: 1.1rem 1.3rem;
+    overflow-x: auto;
+    font-size: 0.86rem;
+    line-height: 1.5;
+  }
+  code { font-family: Consolas, "Courier New", monospace; }
+  blockquote {
+    border-left: 4px solid var(--accent);
+    margin: 1rem 0;
+    padding: 0.6rem 1.1rem;
+    background: var(--card);
+    border-radius: 0 8px 8px 0;
+    font-size: 0.95rem;
+  }
+  footer {
+    margin-top: 3rem;
+    padding: 1.6rem;
+    text-align: center;
+    font-size: 0.88rem;
+    color: var(--muted);
+    border-top: 1px solid var(--border);
+    background: var(--card);
+  }
+  footer a { color: var(--accent); }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Systems Insight Pipeline</h1>
+  <p class="tagline">From a causal loop diagram in Excel to quantitative, decision-ready insight — no equations required to get started.</p>
+  <div class="buttons">
+    <a class="btn-primary" href="https://github.com/vvvasconcelos/SystemsInsightPipeline">View on GitHub</a>
+    <a class="btn-ghost" href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/Minimal.ipynb">Start the tutorial</a>
+    <a class="btn-ghost" href="https://arxiv.org/abs/2508.05659">Read the paper</a>
+  </div>
+</header>
+
+<main>
+  <h2>How it works</h2>
+  <div class="workflow">
+    <span class="step">Draw a causal loop diagram (e.g., in Kumu)</span><span class="arrow">→</span>
+    <span class="step">Annotate the Excel export</span><span class="arrow">→</span>
+    <span class="step">Simulate under uncertainty</span><span class="arrow">→</span>
+    <span class="step">Rank &amp; optimize interventions</span><span class="arrow">→</span>
+    <span class="step">Find the loops that matter</span>
+  </div>
+  <p>
+    Causal loop diagrams capture how experts and stakeholders believe a system works, but they are
+    qualitative. SIP turns them into computational system dynamics models: every causal link gets a
+    sampled coefficient, the system is simulated many times, and the results show which
+    interventions move your outcome — and how confident you can be, given the uncertainty.
+  </p>
+
+  <h2>What it can do</h2>
+  <div class="cards">
+    <div class="card">
+      <h3>CLD → dynamic model</h3>
+      <p>Reads a Kumu-style Excel workbook (variables, links, polarities) and builds a stock–auxiliary–constant ODE model automatically.</p>
+    </div>
+    <div class="card">
+      <h3>Simulation under uncertainty</h3>
+      <p>Samples unknown link coefficients and simulates every candidate intervention across hundreds of parameter draws.</p>
+    </div>
+    <div class="card">
+      <h3>Intervention ranking</h3>
+      <p>Effect distributions per intervention, pairwise comparisons with bootstrapped confidence intervals, and sensitivity analysis of the driving links.</p>
+    </div>
+    <div class="card">
+      <h3>Budget optimization</h3>
+      <p>Optimally splits a budget across all interventions at once — expenditure-space formulation with multi-start SLSQP that scales to dozens of interventions and reports near-optimal alternatives.</p>
+    </div>
+    <div class="card">
+      <h3>Loops That Matter</h3>
+      <p>Scores every feedback loop's contribution to the model's behavior over time (Schoenberg–Davidsen–Eberlein method).</p>
+    </div>
+    <div class="card">
+      <h3>Custom equations</h3>
+      <p>Make any relationship nonlinear straight from the Excel file: sampled parameters (<code>#1</code>), intervention placement (<code>$</code>), and numpy functions.</p>
+    </div>
+  </div>
+
+  <h2>In action: household peak energy use</h2>
+  <p>
+    The figures below come from the included
+    <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/Insulation.ipynb">Insulation tutorial</a>,
+    built on causal loop diagrams from the <a href="https://seven.uva.nl/">SEVEN project</a>
+    (University of Amsterdam) on household energy decisions — 57 variables, 21 feedback loops, and
+    51 candidate interventions on the share of electricity used during peak hours.
+  </p>
+  <div class="figures">
+    <figure>
+      <img src="img/intervention_ranking.png" alt="Box plots ranking the simulated effect of the top interventions on peak-hour electricity use">
+      <figcaption><strong>Which single intervention helps most?</strong> Distribution of each intervention's simulated effect on peak-hour electricity use across parameter samples.</figcaption>
+    </figure>
+    <figure>
+      <img src="img/optimal_allocation.png" alt="Bar chart of mean optimal budget allocation across interventions">
+      <figcaption><strong>How should a budget be split?</strong> Interventions that consistently receive budget when the allocation is optimized for every parameter draw.</figcaption>
+    </figure>
+  </div>
+
+  <h2>Quick start</h2>
+<pre><code>git clone https://github.com/vvvasconcelos/SystemsInsightPipeline.git
+cd SystemsInsightPipeline
+pip install -e .</code></pre>
+<pre><code>from sip_systemsinsightpipeline import Extract, SDM, SDMOptimizer
+
+s = Extract("tutorials/Minimal.xlsx").extract_settings()
+s.seed, s.N, s.t_end, s.time_unit = 12345, 100, 10, "years"
+s.parameter_value_aux = s.parameter_value_stocks = 0.1
+
+sdm = SDM(s)
+sdm.run_simulations()
+effects = sdm.get_intervention_effects()
+
+result = SDMOptimizer(sdm).optimize_intervention_intensities(
+    params=sdm.sample_model_parameters(),
+    costs=[1.0] * len(s.intervention_variables),
+    budget=1.0, maximize=True, n_starts=8, seed=1,
+)</code></pre>
+
+  <h2>Citation</h2>
+  <blockquote>
+    Uleman, J.F., Crielaard, L., Elsenburg, L.K., Veldhuis, G.A., Rod, N.H., Quax, R., &amp;
+    Vasconcelos, V.V. <em>Diagrams-to-Dynamics (D2D): Exploring Causal Loop Diagram Leverage
+    Points under Uncertainty.</em> BMC Medicine (in press).
+    Preprint: <a href="https://arxiv.org/abs/2508.05659">arXiv:2508.05659</a>.
+  </blockquote>
+</main>
+
+<footer>
+  Systems Insight Pipeline is free software under the
+  <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/LICENSE">GPL-3.0 license</a>.
+  It started as a fork of <a href="https://github.com/jerul/systemdynamics">jerul/systemdynamics</a>
+  by Jeroen F. Uleman. Insulation models courtesy of the
+  <a href="https://seven.uva.nl/">SEVEN project</a>.
+</footer>
+
+</body>
+</html>
