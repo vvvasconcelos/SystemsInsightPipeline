@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tutorial — Minimal example · Systems Insight Pipeline</title>
+<meta name="description" content="Step-by-step, pedagogical walkthrough of the Systems Insight Pipeline on a 3-variable model: drawing a causal loop diagram, choosing outcomes and levers, timeframe and time unit, classifying variables, custom equations, interpreting every graph, and budget optimization.">
+<style>
+  :root {
+    --ink: #1c2733;
+    --muted: #5a6b7b;
+    --accent: #21618c;
+    --accent-soft: #eaf2f8;
+    --card: #ffffff;
+    --bg: #f5f7fa;
+    --border: #dde4ec;
+    --good: #1e8449;
+    --warn: #b9770e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: var(--ink); background: var(--bg); line-height: 1.65; }
+  header { background: linear-gradient(135deg, #1a5276, #21618c 60%, #2980b9); color: #fff; padding: 2rem 1.5rem; }
+  header .crumb { font-size: 0.9rem; }
+  header .crumb a { color: #cfe3f3; text-decoration: none; }
+  header h1 { margin: 0.4rem 0 0.2rem; font-size: 1.9rem; }
+  header p { margin: 0.2rem 0 0; color: #d6e6f2; max-width: 50rem; }
+  main { max-width: 54rem; margin: 0 auto; padding: 2rem 1.5rem 1rem; }
+  h2 { color: var(--accent); margin-top: 2.8rem; display: flex; align-items: center; gap: 0.6rem; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 50%; width: 1.7rem; height: 1.7rem; display: inline-flex; align-items: center; justify-content: center; font-size: 1rem; flex: none; }
+  h3 { margin-top: 1.8rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; background: var(--card); font-size: 0.92rem; }
+  th, td { border: 1px solid var(--border); padding: 0.45rem 0.7rem; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); color: var(--accent); }
+  code { font-family: Consolas, "Courier New", monospace; background: var(--accent-soft); padding: 0.05rem 0.3rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: #102a3c; color: #e8f1f8; border-radius: 10px; padding: 1.1rem 1.3rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: inherit; }
+  pre.output { background: #f4f6f8; color: #1c2733; border: 1px solid var(--border); }
+  .callout { border-left: 4px solid var(--accent); background: var(--card); border-radius: 0 10px 10px 0; padding: 0.9rem 1.2rem; margin: 1.2rem 0; }
+  .callout.read { border-color: var(--good); }
+  .callout.read .t { color: var(--good); font-weight: 700; }
+  .callout.tip { border-color: var(--warn); }
+  .callout.tip .t { color: var(--warn); font-weight: 700; }
+  .callout .t { display: block; margin-bottom: 0.3rem; color: var(--accent); font-weight: 700; }
+  figure { margin: 1.4rem 0; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+  figure img, figure svg { width: 100%; height: auto; border-radius: 6px; }
+  figcaption { font-size: 0.9rem; color: var(--muted); margin-top: 0.6rem; }
+  .pair { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem 1.1rem; margin: 1.5rem 0; font-size: 0.95rem; }
+  footer { margin-top: 3rem; padding: 1.6rem; text-align: center; font-size: 0.88rem; color: var(--muted); border-top: 1px solid var(--border); background: var(--card); }
+  a { color: var(--accent); }
+  .next { display: flex; gap: 1rem; flex-wrap: wrap; margin: 2rem 0; }
+  .next a { flex: 1 1 14rem; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.2rem; text-decoration: none; color: var(--ink); }
+  .next a strong { color: var(--accent); display: block; margin-bottom: 0.2rem; }
+  .rule { background: var(--accent-soft); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.3rem; margin: 1.2rem 0; }
+  .rule p { margin: 0.35rem 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="crumb"><a href="index.html">Systems Insight Pipeline</a> / Tutorial</div>
+  <h1>The full workflow — Minimal example</h1>
+  <p>From a sketch on paper to an optimized intervention strategy, on the smallest model that can
+  teach every step: one outcome <em>A</em>, two levers <em>B</em> and <em>C</em>.</p>
+</header>
+
+<main>
+
+<div class="pair">
+  This tutorial has an identical twin built on a real-world model:
+  <a href="tutorial-insulation.html"><strong>the Insulation example</strong></a>.
+  The sections match one-to-one — read this one first, then see every idea again at scale.
+  A runnable notebook version is in
+  <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/Minimal.ipynb">tutorials/Minimal.ipynb</a>.
+</div>
+
+<h2><span class="n">1</span>Draw the causal loop diagram</h2>
+
+<p>Everything starts with a picture of how you believe the system works. Sketch it on paper or a
+whiteboard: one bubble per variable, one arrow per causal influence, and a <strong>polarity</strong>
+on each arrow — <code>+</code> if the cause pushes the effect in the same direction, <code>−</code>
+if it pushes the opposite way.</p>
+
+<figure>
+  <svg viewBox="0 0 640 240" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Sketch of the minimal causal loop diagram: B and C point to A with positive polarity">
+    <defs>
+      <marker id="arr" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+        <path d="M0,0 L8,3 L0,6 Z" fill="#1c2733"/>
+      </marker>
+    </defs>
+    <rect x="8" y="8" width="624" height="224" rx="14" fill="#fffdf5" stroke="#d8cfae" stroke-dasharray="7 5"/>
+    <text x="26" y="34" font-size="13" fill="#8a7d55" font-style="italic">your sketch…</text>
+    <ellipse cx="140" cy="80" rx="58" ry="30" fill="#eaf2f8" stroke="#21618c" stroke-width="2"/>
+    <text x="140" y="86" text-anchor="middle" font-size="18" font-weight="600" fill="#1c2733">B</text>
+    <text x="140" y="128" text-anchor="middle" font-size="11" fill="#5a6b7b">lever (intervention)</text>
+    <ellipse cx="140" cy="180" rx="58" ry="30" fill="#eaf2f8" stroke="#21618c" stroke-width="2"/>
+    <text x="140" y="186" text-anchor="middle" font-size="18" font-weight="600" fill="#1c2733">C</text>
+    <ellipse cx="460" cy="130" rx="64" ry="34" fill="#fdf2e9" stroke="#b9770e" stroke-width="2.5"/>
+    <text x="460" y="128" text-anchor="middle" font-size="18" font-weight="600" fill="#1c2733">A</text>
+    <text x="460" y="146" text-anchor="middle" font-size="11" fill="#b9770e">outcome of interest</text>
+    <path d="M196,90 C 290,100 330,108 392,118" fill="none" stroke="#1c2733" stroke-width="1.8" marker-end="url(#arr)"/>
+    <text x="300" y="92" font-size="16" font-weight="700" fill="#1e8449">+</text>
+    <path d="M196,172 C 290,162 330,154 392,143" fill="none" stroke="#1c2733" stroke-width="1.8" marker-end="url(#arr)"/>
+    <text x="300" y="178" font-size="16" font-weight="700" fill="#1e8449">+</text>
+  </svg>
+  <figcaption>The minimal diagram: levers <em>B</em> and <em>C</em> both increase the outcome
+  <em>A</em>. No feedback loops yet — the <a href="tutorial-insulation.html">insulation twin</a>
+  shows what changes when loops appear.</figcaption>
+</figure>
+
+<p>For anything bigger than a few bubbles, draw the diagram in <a href="https://kumu.io">Kumu</a> —
+a free tool built for maps like this, often used in participatory sessions with stakeholders. Kumu
+can export the diagram as an Excel workbook, and that export is exactly the file format SIP reads.
+You never need to write code to define a model: <strong>the Excel file is the model</strong>.</p>
+
+<h2><span class="n">2</span>Decide what you want from the model</h2>
+
+<p>Before annotating anything, answer two questions explicitly — they anchor every later choice:</p>
+
+<p><strong>Which variables do you want to see vary?</strong> These are your <em>variables of
+interest</em> (VOIs) — the outcomes the whole analysis is about. Here it is <em>A</em>. Be
+deliberate: a diagram drawn in a group session contains many interesting variables, but the
+analysis sharpens enormously once you commit to the one or two whose behavior actually answers
+your question.</p>
+
+<p><strong>Which variables could you act on?</strong> These are your <em>intervention
+variables</em> — the levers. Here, <em>B</em> and <em>C</em>. Include everything plausibly
+actionable (a later step ranks them; you don't need to pre-judge), and note for each whether
+acting means pushing it <em>up</em> or <em>down</em>.</p>
+
+<h2><span class="n">3</span>Choose the timeframe and the time unit</h2>
+
+<p>Two time choices, both anchored to the VOIs you just picked:</p>
+
+<p>The <strong>time unit</strong> is the timescale at which you want to be able to <em>see the
+VOIs vary</em>. If meaningful change in <em>A</em> is something you'd notice year over year, the
+time unit is years; if it plays out week by week, weeks. Every rate in the model will be expressed
+per this unit.</p>
+
+<p>The <strong>timeframe</strong> (<code>t_end</code>) is how far ahead the question reaches — the
+horizon over which interventions get to prove themselves. Here: 10 years.</p>
+
+<h2><span class="n">4</span>Classify every variable: stock, auxiliary, or constant</h2>
+
+<p>With the timeframe and time unit fixed, the classification that beginners find hardest becomes
+a simple two-threshold rule. For each variable, ask how fast it changes:</p>
+
+<div class="rule">
+  <p><strong>Varies more slowly than the timeframe?</strong> → <code>constant</code>. Over the whole
+  simulated horizon it won't move appreciably; treat it as a fixed (but intervenable) condition.</p>
+  <p><strong>Adjusts to its drivers faster than the time unit?</strong> → <code>auxiliary</code>. By
+  the time you look again, it has already settled to whatever its drivers dictate — "(almost)
+  instantly" means <em>within one time unit</em>.</p>
+  <p><strong>In between?</strong> → <code>stock</code>. It accumulates and has memory: it builds up
+  or drains over multiple time units and would stay put if its inputs stopped.</p>
+</div>
+
+<p>Applying the rule here (time unit = years, timeframe = 10 years):</p>
+<ul>
+  <li><em>A</em> responds to <em>B</em> and <em>C</em> faster than a year → <strong>auxiliary</strong>.</li>
+  <li><em>B</em> and <em>C</em> are dials set from outside that don't drift on their own within
+  10 years → <strong>constants</strong>.</li>
+</ul>
+
+<p>Note the consequence: <strong>this model has no stocks, so it has no memory</strong> — we will
+literally see that in the graphs of step 7. The same rule applied to the insulation model (where
+trust and adoption accumulate over years) yields 31 stocks — and rich dynamics.</p>
+
+<h2><span class="n">5</span>Fill the spreadsheet</h2>
+
+<p>The workbook has one sheet for the bubbles and one for the arrows. With steps 2–4 decided, every
+cell is now determined. This is the entire <code>Minimal.xlsx</code>:</p>
+
+<p><strong>Elements</strong> — one row per variable:</p>
+<table>
+  <tr><th>Label</th><th>Type</th><th>Tags</th><th>Description</th><th>Equation</th></tr>
+  <tr><td>A</td><td>auxiliary</td><td>0</td><td>VOI</td><td><code>#1*B*C+0.01*#2*B+0.01*#3*C</code></td></tr>
+  <tr><td>B</td><td>constant</td><td>1</td><td></td><td></td></tr>
+  <tr><td>C</td><td>constant</td><td>1</td><td></td><td></td></tr>
+</table>
+
+<ul>
+  <li><code>Type</code> — the step-4 classification (case-insensitive).</li>
+  <li><code>Description</code> — write <code>VOI</code> on each variable of interest from step 2.</li>
+  <li><code>Tags</code> — a nonzero value marks an intervention variable from step 2; the number is
+  the intervention strength and its sign the direction (<code>-1</code> for a lever you would push
+  down).</li>
+  <li><code>Equation</code> — optional, step 6.</li>
+</ul>
+
+<p><strong>Connections</strong> — one row per arrow:</p>
+<table>
+  <tr><th>From</th><th>Type</th><th>To</th></tr>
+  <tr><td>B</td><td>+</td><td>A</td></tr>
+  <tr><td>C</td><td>+</td><td>A</td></tr>
+</table>
+
+<p>An optional <strong>Interactions</strong> sheet (<code>From1, From2, Type, To</code>) can declare
+pairwise interaction terms; here we express the interaction through the equation instead.</p>
+
+<p>The remaining knobs are five lines of Python — the step-3 choices plus how thoroughly to sample
+the uncertainty:</p>
+
+<pre><code>from sip_systemsinsightpipeline import Extract, SDM
+
+s = Extract("Minimal.xlsx").extract_settings()
+s.seed = 12345                  # reproducibility
+s.N = 200                       # how many parameter samples (more = smoother, slower)
+s.t_end = 10                    # timeframe (step 3)
+s.time_unit = "years"           # time unit (step 3)
+s.parameter_value_aux = 0.1     # max sampled rate for auxiliaries / equation parameters
+s.parameter_value_stocks = 0.1  # max sampled rate for stocks
+
+sdm = SDM(s)</code></pre>
+
+<div class="callout">
+  <span class="t">The parameter bounds set the speed of the system</span>
+  SIP samples every unknown link coefficient uniformly from <code>[0, bound]</code> (with the
+  arrow's polarity sign; from <code>[−bound, bound]</code> when polarity is unknown). A bound of
+  0.1 per year means the fastest sampled process reacts on a ~10-year timescale (1/0.1) — consistent
+  with our classification of slow stocks. If stocks should change noticeably within the timeframe,
+  keep <code>bound × t_end</code> from being ≪ 1. There is no time step to choose: the integrator
+  (LSODA) adapts its own internal steps; <code>sdm.t_eval = np.linspace(0, s.t_end, 41)</code> only
+  sets where the solution is <em>recorded</em> for plotting.
+</div>
+
+<h2><span class="n">6</span>Advanced: annotate the formulas (the <code>Equation</code> column)</h2>
+
+<div class="callout">
+  <span class="t">What happens if you write nothing</span>
+  <strong>Default equation</strong>: every variable is a linear combination of its incoming arrows
+  with sampled coefficients — for an auxiliary, <code>value = Σ coeffᵢ · sourceᵢ</code>; for a
+  stock, the same sum is its <em>rate of change</em> (so influences accumulate). This is the right
+  default for purely qualitative diagrams.<br>
+  <strong>Default intervention entry</strong>: if no <code>$</code> is specified, an intervention
+  shifts a <em>constant</em>'s value, a <em>stock</em>'s initial condition, and is <em>added to the
+  result</em> of an auxiliary's (custom or default) equation.
+</div>
+
+<p>When you know more than the default — a saturation, a threshold, a synergy — write it in the
+<code>Equation</code> column:</p>
+
+<table>
+  <tr><th>Notation</th><th>Meaning</th></tr>
+  <tr><td><code>B</code>, <code>C</code></td><td>variable names, exactly as in the model</td></tr>
+  <tr><td><code>#1</code>, <code>#2</code>, …</td><td>free parameters, each sampled uniformly from <code>[0, parameter_value_aux]</code></td></tr>
+  <tr><td><code>$</code></td><td>where the intervention enters; if omitted, the default above applies</td></tr>
+  <tr><td><code>np.exp</code>, <code>np.tanh</code>, <code>np.sqrt</code>, <code>sigmoid</code>, …</td><td>numpy functions for nonlinear shapes</td></tr>
+</table>
+
+<p>The equation in this model is:</p>
+<pre><code>#1*B*C + 0.01*#2*B + 0.01*#3*C</code></pre>
+<p>Read it as a modeling statement: <em>A is driven mostly by B and C acting <strong>together</strong>
+(the product), while each alone has only a weak direct effect.</em></p>
+
+<div class="callout tip">
+  <span class="t">The range-scaling trick: number × parameter</span>
+  Every <code>#</code> parameter is sampled from the same range, <code>[0, parameter_value_aux]</code>
+  (here [0, 0.1]). To give different terms different ranges, <strong>multiply the parameter by a
+  constant</strong>: <code>0.01*#2</code> is effectively a parameter sampled from [0, 0.001] —
+  a hundred times weaker than <code>#1</code>. This is how the equation above encodes "the synergy
+  dominates, direct effects are small" without fixing any exact value. The same trick widens ranges
+  (<code>10*#1</code>) or flips signs (<code>-#1</code> for a coefficient known to be negative).
+</div>
+
+<p>SIP validates each equation against the diagram and warns when an equation uses a variable that
+has no incoming arrow, or silently ignores an arrow that exists — catching typos before they become
+wrong conclusions.</p>
+
+<h2><span class="n">7</span>Simulate, and read each graph carefully</h2>
+
+<pre><code>df_sol_per_sample, param_samples = sdm.run_simulations()
+effects = sdm.get_intervention_effects()
+voi = s.variable_of_interest[0]
+
+from sip_systemsinsightpipeline.plots import plot_simulated_intervention_ranking
+plot_simulated_intervention_ranking(s, effects[voi], voi)</code></pre>
+
+<h3>7.1 — The intervention ranking</h3>
+<figure>
+  <img src="img/minimal_ranking.png" alt="Box plots of the simulated effect of interventions B and C on outcome A">
+  <figcaption>Each box summarizes one intervention's effect on <em>A</em> at the end of the
+  timeframe, across all 200 parameter samples.</figcaption>
+</figure>
+<div class="callout read">
+  <span class="t">How to read it</span>
+  The vertical line in each box is the <strong>median effect</strong> — the typical outcome. The box
+  spans the middle 50% of parameter samples and the whiskers most of the rest: a <strong>wide box
+  means the diagram alone cannot pin the effect down</strong>, and gathering evidence on that
+  pathway would be valuable. Boxes right of the dashed zero line increase the outcome; left of it,
+  decrease. When two boxes overlap heavily — as <em>B</em> and <em>C</em> do here, by the symmetry
+  of the model — the ranking between them is <em>not</em> robust, and you should not present one as
+  better than the other.
+</div>
+
+<h3>7.2 — Behavior over time</h3>
+<figure>
+  <img src="img/minimal_timecourse.png" alt="Time course of A under interventions on B and C: flat lines">
+  <figcaption>Median trajectory of <em>A</em> (with 10–90% band) under each intervention.</figcaption>
+</figure>
+<div class="callout read">
+  <span class="t">How to read it — and why it is flat</span>
+  The trajectories jump to their level immediately and stay there. That is not a bug; it is the
+  model honestly reporting its structure: <strong>there are no stocks, so nothing accumulates and
+  nothing unfolds over time</strong> — exactly what the step-4 classification predicted. The moment
+  a diagram contains stocks and feedback loops, these curves bend, overshoot, and saturate —
+  compare the <a href="tutorial-insulation.html#timecourse">same plot in the insulation twin</a>.
+  If your time-course plots look flat and you expected dynamics, revisit step 4: something that
+  should be a stock is probably labeled auxiliary.
+</div>
+
+<h3>7.3 — Sensitivity analysis: which assumptions matter?</h3>
+<pre><code>SA_results, df_SA = sdm.run_SA(voi, None, cut_off_SA_importance=0.1)</code></pre>
+<pre class="output">+-------+------+--------------------+------------------+----------------+
+| Link  | Rho  | 95% CI (bootstrap) | Mean Rho per Int | SD Rho per Int |
++-------+------+--------------------+------------------+----------------+
+| p2-&gt;A | 0.52 |    [0.45, 0.63]    |       0.5        |      0.5       |
+| p3-&gt;A | 0.47 |    [0.39, 0.56]    |       0.5        |      0.5       |
++-------+------+--------------------+------------------+----------------+</pre>
+<div class="callout read">
+  <span class="t">How to read it</span>
+  Each row is one sampled parameter (here <code>p2</code>, <code>p3</code> — the <code>#2</code> and
+  <code>#3</code> equation parameters). <strong>Rho</strong> is the rank correlation between that
+  parameter's sampled value and the intervention effect: parameters with large |Rho| are the
+  assumptions your conclusions hinge on — prime candidates for measurement or literature review.
+  The <strong>per-intervention columns</strong> add nuance: a mean of 0.5 with SD 0.5 means the
+  parameter matters enormously for one intervention and not at all for the other (here, <code>#2</code>
+  only matters when intervening on <em>B</em>). And notice who is <em>missing</em>: <code>p1</code>,
+  the synergy coefficient, falls below the cutoff — because single interventions move only one of
+  <em>B</em> or <em>C</em>, the product <code>B*C</code> stays near zero and <code>#1</code> never
+  gets to act. Hold that thought for step 8.
+</div>
+
+<h2><span class="n">8</span>Optimize a budget — and read the allocation plots</h2>
+
+<p>Ranking tests one lever at a time. Real decisions split a budget across levers. The optimizer
+works in <em>expenditure space</em>: each intervention gets an expenditure
+<code>y<sub>i</sub> = cost<sub>i</sub> × intensity<sub>i</sub></code>, with <code>y ≥ 0</code> and
+<code>Σy ≤ budget</code>, and multi-start SLSQP finds the split that maximizes (or minimizes) the
+outcome. Besides the best split it also reports <em>near-optimal</em> alternatives — allocations
+within 5% of the best effect:</p>
+
+<pre><code>from sip_systemsinsightpipeline import SDMOptimizer
+
+params = sdm.sample_model_parameters()      # one draw of the uncertain world
+costs = [1.0] * len(s.intervention_variables)
+
+optimizer = SDMOptimizer(sdm)
+result = optimizer.optimize_intervention_intensities(
+    params=params, costs=costs, variable_of_interest=voi,
+    budget=1.0, maximize=True, n_starts=8, seed=1)</code></pre>
+
+<pre class="output">Success: True
+Best effect size: 0.02094
+Near-optimal allocations found: 5
+  B: intensity 0.501
+  C: intensity 0.499</pre>
+
+<div class="callout read">
+  <span class="t">How to read it</span>
+  The optimizer recommends spending the budget <strong>half on B, half on C</strong> — and the
+  resulting effect is more than an order of magnitude larger than the typical single-intervention
+  effect from the ranking (~0.0005). This is the synergy that step 7.3 showed was invisible to
+  single interventions: only a joint allocation activates the <code>B*C</code> term. "Near-optimal
+  allocations found" counts distinct budget splits within 5% of the best — alternatives worth
+  knowing about when some lever is politically or practically harder to pull.
+</div>
+
+<h3>8.1 — The allocation scatter: optimization under uncertainty</h3>
+<p>One parameter draw is one possible world. Re-optimizing for many draws, and plotting the best
+allocation of each draw in the plane of the <strong>two interventions that receive the most
+budget</strong>, shows how robust the strategy is:</p>
+
+<pre><code>opt_df = optimizer.optimize_across_parameter_samples(
+    costs=costs, variable_of_interest=voi, maximize=True,
+    n_parameter_samples=100, n_starts=4, seed=1)
+best_per_draw = opt_df[opt_df.equilibrium_idx == 0]   # near-optimal alternates have idx 1, 2, ...</code></pre>
+
+<figure>
+  <img src="img/minimal_allocation_scatter.png" alt="Scatter of optimal B and C intensities across parameter draws, tightly clustered at the even split on the budget line">
+  <figcaption>Each dot is the optimal (B, C) allocation for one parameter draw (most of the 100 dots
+  overlap at the even split); color is the achieved effect on <em>A</em>.</figcaption>
+</figure>
+<div class="callout read">
+  <span class="t">How to read it</span>
+  The dashed line is the <strong>budget constraint</strong>: allocations on it spend everything; the
+  shaded triangle below leaves money unspent. Every dot sits <em>on</em> the line — all influences
+  are non-negative here, so spending the full budget is always optimal. The dots <strong>cluster
+  tightly at the even split (0.5, 0.5)</strong>: the synergy strategy is optimal in essentially
+  every sampled world, which makes it <em>robust to parameter uncertainty</em> — the strongest
+  endorsement this analysis can give. The few off-center dots are draws in which the sampled
+  synergy happened to be weak, so the optimum tilts toward whichever direct effect dominates (in
+  the rare extreme, a corner dot: everything on one lever). The color shows what each world allows:
+  bright dots are draws where the levers genuinely move <em>A</em>. If you instead see several
+  distinct clusters, the model supports genuinely different strategies — a finding worth reporting,
+  not a failure.
+</div>
+
+<h2><span class="n">9</span>Feedback loops: Loops That Matter</h2>
+
+<p>This model has <strong>no feedback loops</strong> — the diagram is acyclic, which is precisely
+why its behavior is so tame. SIP's <code>LoopsThatMatter</code> analysis scores every loop's
+contribution to the dynamics over time, and it becomes interesting the moment your diagram feeds
+back on itself. See <a href="tutorial-insulation.html#ltm">the loops section of the insulation
+twin</a>, where 21 real loops compete for dominance.</p>
+
+<h2><span class="n">10</span>Checklist</h2>
+
+<table>
+  <tr><th></th><th>Step</th><th>Where</th></tr>
+  <tr><td>1</td><td>Sketch variables, arrows, polarities; redraw in Kumu; export to Excel</td><td>paper → Kumu</td></tr>
+  <tr><td>2</td><td>Decide the variables of interest and the intervention variables</td><td>reflection</td></tr>
+  <tr><td>3</td><td>Choose the time unit (speed at which VOIs should visibly vary) and the timeframe</td><td>reflection</td></tr>
+  <tr><td>4</td><td>Classify: slower than timeframe → constant; faster than time unit → auxiliary; in between → stock</td><td>rule of thumb</td></tr>
+  <tr><td>5</td><td>Fill Elements / Connections; set <code>Type</code>, <code>VOI</code>, <code>Tags</code>; set timeframe and sampling bounds in 5 lines of Python</td><td>Excel + Python</td></tr>
+  <tr><td>6</td><td>Optional: custom equations (<code>#</code>, <code>$</code>, range-scaling trick); know the defaults</td><td>Excel</td></tr>
+  <tr><td>7</td><td>Simulate; read ranking, time courses, sensitivity analysis</td><td>Python</td></tr>
+  <tr><td>8</td><td>Optimize the budget; read the allocation scatter</td><td>Python</td></tr>
+  <tr><td>9</td><td>Check which feedback loops drive the behavior</td><td>Python</td></tr>
+</table>
+
+<div class="next">
+  <a href="tutorial-insulation.html"><strong>Same tutorial, real-world model →</strong>
+  57 variables, 21 feedback loops, 51 interventions: household peak energy use from the SEVEN project.</a>
+  <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/Minimal.ipynb"><strong>Run it yourself →</strong>
+  This entire page as an executable notebook: tutorials/Minimal.ipynb.</a>
+</div>
+
+</main>
+
+<footer>
+  <a href="index.html">Systems Insight Pipeline</a> ·
+  <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline">GitHub</a> ·
+  Method: Uleman et&nbsp;al., <em>Diagrams-to-Dynamics (D2D)</em>, BMC Medicine (in press),
+  <a href="https://arxiv.org/abs/2508.05659">arXiv:2508.05659</a>
+</footer>
+
+</body>
+</html>

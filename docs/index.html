@@ -104,8 +104,8 @@
   <h1>Systems Insight Pipeline</h1>
   <p class="tagline">From a causal loop diagram in Excel to quantitative, decision-ready insight — no equations required to get started.</p>
   <div class="buttons">
-    <a class="btn-primary" href="https://github.com/vvvasconcelos/SystemsInsightPipeline">View on GitHub</a>
-    <a class="btn-ghost" href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/Minimal.ipynb">Start the tutorial</a>
+    <a class="btn-primary" href="tutorial-minimal.html">Start the tutorial</a>
+    <a class="btn-ghost" href="https://github.com/vvvasconcelos/SystemsInsightPipeline">View on GitHub</a>
     <a class="btn-ghost" href="https://arxiv.org/abs/2508.05659">Read the paper</a>
   </div>
 </header>
@@ -154,6 +154,27 @@
     </div>
   </div>
 
+  <h2>Learn it step by step</h2>
+  <p>
+    Two detailed, pedagogical tutorials walk through the <em>entire</em> process — sketching the
+    diagram, annotating it (timeframe, timescale, outcome, levers), writing custom equations, and
+    carefully reading every graph including the optimization plots. They are twins: identical
+    sections, different scale.
+  </p>
+  <div class="cards">
+    <div class="card">
+      <h3><a href="tutorial-minimal.html">Tutorial 1 — the Minimal example</a></h3>
+      <p>Three variables, one custom equation, every concept dissected. Start here.
+      (<a href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/Minimal.ipynb">notebook version</a>)</p>
+    </div>
+    <div class="card">
+      <h3><a href="tutorial-insulation.html">Tutorial 2 — the Insulation example</a></h3>
+      <p>The same eight steps on a real participatory model: 57 variables, 21 feedback loops, a
+      51-intervention budget optimization.
+      (<a href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/Insulation.ipynb">notebook version</a>)</p>
+    </div>
+  </div>
+
   <h2>In action: household peak energy use</h2>
   <p>
     The figures below come from the included
@@ -164,11 +185,11 @@
   </p>
   <div class="figures">
     <figure>
-      <img src="img/intervention_ranking.png" alt="Box plots ranking the simulated effect of the top interventions on peak-hour electricity use">
+      <img src="img/insulation_ranking.png" alt="Box plots ranking the simulated effect of the top interventions on peak-hour electricity use">
       <figcaption><strong>Which single intervention helps most?</strong> Distribution of each intervention's simulated effect on peak-hour electricity use across parameter samples.</figcaption>
     </figure>
     <figure>
-      <img src="img/optimal_allocation.png" alt="Bar chart of mean optimal budget allocation across interventions">
+      <img src="img/insulation_allocation_mean.png" alt="Bar chart of mean optimal budget allocation across interventions">
       <figcaption><strong>How should a budget be split?</strong> Interventions that consistently receive budget when the allocation is optimized for every parameter draw.</figcaption>
     </figure>
   </div>
