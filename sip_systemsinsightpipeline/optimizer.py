@@ -1,4 +1,4 @@
-"""
+﻿"""
 Intervention optimization module for System Dynamics Models (SDM).
 
 Key design choices:
@@ -245,8 +245,8 @@ class SDMOptimizer:
         seed: Optional[int] = None,
         sobol_power_of_two: bool = True,
         # near-optimal selection (effect size primary, total cost secondary)
-        threshold_atol: float = 0.01,
-        threshold_rtol: float = 0.0,
+        threshold_atol: float = 0.0,
+        threshold_rtol: float = 0.05,
         cost_atol: float = 0.01,
         # dedupe in y-space
         y_dedupe_tol: float = 1e-6,
@@ -291,9 +291,13 @@ class SDMOptimizer:
             Near-optimal inclusion rule for effect size (primary criterion):
               maximize:  best - current <= atol + rtol*abs(best)
               minimize:  current - best <= atol + rtol*abs(best)
+            The default is relative (within 5% of the best effect), so the rule is
+            scale-free; an absolute atol is only meaningful if you know the scale of
+            your variable of interest.
         cost_atol : float
             Near-optimal inclusion rule for total cost (secondary criterion):
-            Among solutions passing effect size filter, keep those within cost_atol of the minimum cost.
+            Among solutions passing the effect size filter, keep those within cost_atol
+            of the minimum cost. The best-effect allocation itself is always kept.
         y_dedupe_tol : float
             Dedupe solutions by Euclidean distance in y-space.
         slsqp_maxiter, slsqp_ftol : optimizer tuning parameters.
@@ -552,10 +556,14 @@ class SDMOptimizer:
                     )
                 )
 
-        # Secondary filter: total cost within tolerance of minimum cost among candidates
+        # Secondary filter: total cost within tolerance of minimum cost among candidates.
+        # The best-effect allocation is exempt - it must always be reported, otherwise a
+        # cheaper near-optimal point would silently displace the true optimum.
         if len(candidates) > 0:
+            best_cand = min(candidates, key=lambda c: c.fun)
             min_cost = min(c.total_cost for c in candidates)
-            candidates = [c for c in candidates if (c.total_cost - min_cost) <= cost_atol]
+            candidates = [c for c in candidates
+                          if c is best_cand or (c.total_cost - min_cost) <= cost_atol]
 
         # Order candidates by effect size (best first), then by cost (lowest first)
         candidates.sort(key=lambda e: (-e.effect_size if maximize else e.effect_size, e.total_cost))
@@ -630,11 +638,11 @@ class SDMOptimizer:
         n_starts: Optional[int] = None,
         seed: Optional[int] = None,
         sobol_power_of_two: bool = True,
-        threshold_atol: float = 0.01,
-        threshold_rtol: float = 0.0,
+        threshold_atol: float = 0.0,
+        threshold_rtol: float = 0.05,
         y_dedupe_tol: float = 1e-6,
-        slsqp_maxiter: int = 50,
-        slsqp_ftol: float = 1e-3,
+        slsqp_maxiter: int = 200,
+        slsqp_ftol: float = 1e-9,
         penalty_value: float = 1e30,
         debug: bool = False,
         algorithm: str = "multistart_slsqp",
