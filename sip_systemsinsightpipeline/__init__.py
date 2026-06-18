@@ -1,5 +1,5 @@
 # __init__.py
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 __author__ = "Vítor V. Vasconcelos"
 __email__ = "v.v.vasconcelos@uva.nl"
 
