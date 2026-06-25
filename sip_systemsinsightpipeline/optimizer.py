@@ -215,8 +215,9 @@ class SDMOptimizer:
                                 params[var_2] = {}
                             params[var_2]["Intercept"] = delta_2
 
-            # Get system matrices A and b (if applicable)
-            if getattr(self.sdm, "interaction_terms", None):
+            # Get system matrices A and b (if applicable). Equation models integrate
+            # through the nonlinear path in run_SDM, which ignores A/b, so skip building them.
+            if getattr(self.sdm, "interaction_terms", None) or getattr(self.sdm, "_uses_equations", False):
                 A = None
                 b = None
             else:

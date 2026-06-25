@@ -49,6 +49,13 @@ class SDM:
             for warning in self.equation_warnings:
                 print(f"Warning: {warning}")
 
+        # Models with any valid custom equation must be integrated through the nonlinear
+        # ODE path (dz_dt_int -> _compute_equation_value), even with no interaction terms,
+        # otherwise the linear A/b shortcut silently ignores the equations.
+        self._uses_equations = bool(self._equation_evaluator) and any(
+            self._equation_evaluator.has_custom_equation(var) for var in self.equations
+        )
+
         self.num_pars_stocks = int((self.df_adj.loc[self.stocks, :] != 0).sum().sum())
         self.num_pars_auxiliaries = int((self.df_adj.loc[self.auxiliaries, :] != 0).sum().sum())
 
@@ -163,7 +170,7 @@ class SDM:
                         if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var_2)):
                             params[var_2]["Intercept"] = (1/2) * self.intervention_strengths[var_2]
 
-                if self.interaction_terms:
+                if self.interaction_terms or self._uses_equations:
                     #K = self.params_to_K(params)
                     A = None
                     b = None
@@ -190,11 +197,16 @@ class SDM:
     def run_SDM(self, x0, constants_values, A, b, params):
         """ Run the SDM and return a dataframe with all the variables at every time step, including auxiliaries.
         """
-        if self.interaction_terms:
+        if self.interaction_terms or self._uses_equations:
             solution = solve_ivp(self.dz_dt_int, self.t_span, x0, args=(constants_values, params),
-                                 t_eval=self.t_eval, method=self.solver, rtol=1e-6, atol=1e-6).y.T       
+                                 t_eval=self.t_eval, method=self.solver, rtol=1e-6, atol=1e-6).y.T
         else:  # Linear system
-            if self.solve_analytically: 
+            # Guard against silent regression: custom equations are only honoured on the
+            # nonlinear path above, so they must never reach the linear A/b solver.
+            if self._uses_equations:
+                warnings.warn("Custom equations are present but the linear SDM path was taken; "
+                              "the equations would be ignored. This indicates a routing bug.")
+            if self.solve_analytically:
                 solution = self.analytical_solution(self.t_eval[:, None], x0, A, b)
             else:
                 solution = solve_ivp(self.solve_sdm_linear, self.t_span, x0, args=(A, b),

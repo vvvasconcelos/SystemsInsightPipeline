@@ -684,11 +684,13 @@ class LoopsThatMatter:
                 x0 = np.zeros(len(self.stocks), dtype=np.float64)
                 constants_values = np.zeros(len(self.constants), dtype=np.float64)
                 
-                if self.sdm.interaction_terms:
+                # Equation models integrate through the nonlinear path in run_SDM, which
+                # ignores A/b, so skip building them (mirrors run_simulations).
+                if self.sdm.interaction_terms or getattr(self.sdm, "_uses_equations", False):
                     A, b = None, None
                 else:
                     A, b = self.sdm.params_to_A_b(params, constants_values)
-                
+
                 df_sol = self.sdm.run_SDM(x0, constants_values, A, b, params)
         finally:
             # Restore original t_eval and t_span
