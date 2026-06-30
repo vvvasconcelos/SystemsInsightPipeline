@@ -206,6 +206,56 @@ def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol 
     return fig
 
 
+def plot_moment_independent(df, measure="delta", top=None, title=None, ax=None):
+    """Horizontal bar chart of a moment-independent sensitivity measure.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Output of :meth:`SDM.run_GSA` with ``method="delta"`` (columns ``delta, delta_conf``)
+        or ``method="pawn"`` (column ``pawn_median``).
+    measure : {"delta", "pawn"}
+        Which column to plot.
+    top : int, optional
+        Show only the ``top`` parameters by the measure.
+
+    Returns the matplotlib Figure. matplotlib-only; does not set a global style.
+    """
+    if measure == "delta":
+        value_col, conf_col, sort_col, label = "delta", "delta_conf", "delta", "Borgonovo δ (moment-independent)"
+        default_title = "Distributional importance (Borgonovo δ)"
+    elif measure == "pawn":
+        value_col, conf_col, sort_col, label = "pawn_median", None, "pawn_median", "PAWN (median KS statistic)"
+        default_title = "Distributional importance (PAWN)"
+    else:
+        raise ValueError(f"measure must be 'delta' or 'pawn', got {measure!r}.")
+    if value_col not in df.columns:
+        raise ValueError(f"DataFrame has no '{value_col}' column; was it produced with method='{measure}'?")
+
+    d = df.sort_values(sort_col, ascending=False)
+    if top is not None:
+        d = d.head(int(top))
+    d = d.iloc[::-1].reset_index(drop=True)
+    y = np.arange(len(d))
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, max(2.5, 0.45 * len(d) + 1.5)))
+    else:
+        fig = ax.figure
+
+    xerr = d[conf_col].values if conf_col and conf_col in d.columns else None
+    ax.barh(y, d[value_col], height=0.6, color="#74a9cf", edgecolor="white",
+            xerr=xerr, error_kw=dict(ecolor="#5a6b7b", lw=1, capsize=3), zorder=2)
+    ax.set_yticks(y)
+    ax.set_yticklabels(d["parameter"])
+    ax.set_xlabel(label)
+    ax.set_title(title or default_title, loc="left", fontweight="bold")
+    ax.set_xlim(left=0)
+    ax.margins(y=0.02)
+    fig.tight_layout()
+    return fig
+
+
 def plot_scenario_tradeoff(result, ax=None, title="Scenario discovery: coverage-density trade-off"):
     """Plot the PRIM peeling trajectory in coverage-density space.
 

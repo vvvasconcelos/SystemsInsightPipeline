@@ -192,3 +192,119 @@ def test_plot_gsa_returns_figure(tmp_path):
     fig = plot_gsa(df)
     assert fig is not None
     assert len(fig.axes) >= 1
+
+
+# --------------------------------------------------------------------------- BCa intervals
+
+def test_bca_interval_respects_boundary_and_is_asymmetric():
+    """BCa intervals for a true-zero index stay within [0,1], are asymmetric, never below 0,
+    and differ from the plain percentile interval."""
+    Ishigami = pytest.importorskip("SALib.test_functions.Ishigami")
+    names = ["x1", "x2", "x3"]
+    bounds = [(-np.pi, np.pi)] * 3
+    f = lambda r: Ishigami.evaluate(r.reshape(1, -1))[0]
+
+    bca, _, _ = gsa.run_sobol(names, bounds, f, n=256, seed=3, ci="bca")
+    pct, _, _ = gsa.run_sobol(names, bounds, f, n=256, seed=3, ci="percentile")
+
+    assert (bca["S1_low"] >= 0).all() and (bca["ST_low"] >= 0).all()
+    assert (bca["S1_high"] <= 1.0 + 1e-9).all()
+    x3 = bca.set_index("parameter").loc["x3"]
+    assert x3["S1_low"] == 0.0 and x3["S1_high"] > x3["S1_low"]   # one-sided / asymmetric
+    # BCa and percentile give genuinely different bounds (the bias/skew correction does something)
+    merged = bca.set_index("parameter")["S1_high"] - pct.set_index("parameter")["S1_high"]
+    assert (merged.abs() > 1e-6).any()
+
+
+def test_sobol_estimator_matches_salib():
+    """Our vectorised _sobol_point reproduces SALib's first_order/total_order exactly."""
+    Ishigami = pytest.importorskip("SALib.test_functions.Ishigami")
+    sa = pytest.importorskip("SALib.analyze.sobol")
+    ss = pytest.importorskip("SALib.sample.sobol")
+    prob = {"num_vars": 3, "names": ["x1", "x2", "x3"], "bounds": [[-np.pi, np.pi]] * 3}
+    X = ss.sample(prob, 128, calc_second_order=False, seed=1)
+    Y = Ishigami.evaluate(X)
+    N = len(Y) // 5
+    A, B, AB, _ = sa.separate_output_values(Y, 3, N, False)
+    s1, st = gsa._sobol_point(A, B, AB)
+    salib_s1 = np.array([sa.first_order(A, AB[:, j], B) for j in range(3)]).ravel()
+    salib_st = np.array([sa.total_order(A, AB[:, j], B) for j in range(3)]).ravel()
+    assert np.allclose(s1, salib_s1)
+    assert np.allclose(st, salib_st)
+
+
+# --------------------------------------------------------------------------- moment-independent
+
+def test_delta_captures_distributional_effect_missed_by_variance():
+    """Borgonovo delta gives Ishigami x3 a clearly positive importance, while its variance-based
+    first-order S1 ~ 0 -- the distributional effect variance decomposition misses."""
+    Ishigami = pytest.importorskip("SALib.test_functions.Ishigami")
+    latin = pytest.importorskip("SALib.sample.latin")
+    names = ["x1", "x2", "x3"]
+    prob = {"num_vars": 3, "names": names, "bounds": [[-np.pi, np.pi]] * 3}
+    X = latin.sample(prob, 3000, seed=1)
+    Y = Ishigami.evaluate(X)
+
+    df = gsa.moment_independent(X, Y, names, method="delta", seed=1)
+    assert list(df.columns) == ["parameter", "delta", "delta_conf", "S1", "S1_conf"]
+    assert (df["delta"] >= 0).all()                          # non-negative by construction
+    d = df.set_index("parameter")
+    assert d.loc["x3", "delta"] > 0.08                       # delta sees x3
+    assert d.loc["x3", "S1"] < 0.05                          # variance-based first-order does not
+    # x1, x2 (the main-effect drivers) rank above x3
+    assert d.loc["x1", "delta"] > d.loc["x3", "delta"]
+    assert d.loc["x2", "delta"] > d.loc["x3", "delta"]
+
+
+def test_pawn_nonnegative_and_ranks_drivers():
+    Ishigami = pytest.importorskip("SALib.test_functions.Ishigami")
+    latin = pytest.importorskip("SALib.sample.latin")
+    names = ["x1", "x2", "x3"]
+    prob = {"num_vars": 3, "names": names, "bounds": [[-np.pi, np.pi]] * 3}
+    X = latin.sample(prob, 3000, seed=2)
+    Y = Ishigami.evaluate(X)
+    df = gsa.moment_independent(X, Y, names, method="pawn", seed=2)
+    assert "pawn_median" in df.columns
+    assert (df["pawn_median"] >= 0).all()
+    m = df.set_index("parameter")["pawn_median"]
+    assert m["x2"] > m["x3"] and m["x1"] > m["x3"]
+
+
+def test_moment_independent_reproducible_and_degenerate():
+    names = ["a", "b"]
+    rng = np.random.default_rng(0)
+    X = rng.uniform(0, 1, size=(500, 2))
+    y = X[:, 0] + 0.01 * rng.standard_normal(500)
+    a = gsa.moment_independent(X, y, names, method="delta", seed=5)
+    b = gsa.moment_independent(X, y, names, method="delta", seed=5)
+    pd.testing.assert_frame_equal(a, b)
+    with pytest.raises(ValueError, match="zero variance"):
+        gsa.moment_independent(X, np.ones(500), names, method="delta")
+
+
+def test_run_gsa_delta_and_pawn_on_model(tmp_path):
+    """SDM.run_GSA(method='delta'/'pawn') runs end to end and ranks the dominant equation
+    parameter above the down-scaled one."""
+    df_e = pd.DataFrame({
+        "Label": ["Outcome", "DriverA", "DriverB"],
+        "Type": ["auxiliary", "constant", "constant"],
+        "Tags": [0, 1, 1],
+        "Description": ["VOI", "", ""],
+        "Equation": ["#1 * DriverA + 0.01 * #2 * DriverB", None, None],
+    })
+    df_c = pd.DataFrame({"From": ["DriverA", "DriverB"], "Type": ["+", "+"],
+                         "To": ["Outcome", "Outcome"]})
+    with pd.ExcelWriter(tmp_path / "eq.xlsx") as w:
+        df_e.to_excel(w, sheet_name="Elements", index=False)
+        df_c.to_excel(w, sheet_name="Connections", index=False)
+    s = Extract(str(tmp_path / "eq.xlsx")).extract_settings()
+    s.seed, s.N, s.t_end = 0, 1, 10
+    s.parameter_value_aux = s.parameter_value_stocks = 0.3
+    sdm = SDM(s)
+
+    dl = sdm.run_GSA(method="delta", n=400, seed=1, show_progress=False)
+    assert dl.iloc[0]["parameter"].endswith("#1")
+    assert (dl["delta"] >= 0).all()
+    pw = sdm.run_GSA(method="pawn", n=400, seed=1, show_progress=False)
+    assert pw.iloc[0]["parameter"].endswith("#1")
+    assert (pw["pawn_median"] >= 0).all()

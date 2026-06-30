@@ -729,10 +729,24 @@ class SDM:
                     outputs[label][row_idx] = float(reduce_fn(df_sol))
         return outputs
 
-    def run_GSA(self, variable_of_interest=None, *, bounds=None, n=1024,
+    def run_GSA(self, variable_of_interest=None, *, method="sobol", bounds=None, n=1024,
                 second_order=False, outcome="final", reducer=None, intervention=None,
-                n_bootstrap=200, conf_level=0.95, clip=True, seed=None, show_progress=True):
-        """Variance-based (Sobol) global sensitivity analysis of the model's parameters.
+                n_bootstrap=200, conf_level=0.95, clip=True, ci="bca", seed=None,
+                show_progress=True):
+        """Global sensitivity analysis of the model's uncertain parameters.
+
+        Three methods are available via ``method``:
+
+        - ``"sobol"`` (default) — variance-based first-order ``S1`` and total-order ``ST`` Sobol
+          indices from a Saltelli design (total runs ``n*(d+2)``), with BCa bootstrap confidence
+          intervals projected onto ``[0, 1]``. Decomposes the *variance* of the outcome.
+        - ``"delta"`` — Borgonovo's moment-independent ``delta`` measure (plus given-data ``S1``)
+          from a Monte-Carlo ensemble of ``n`` runs. Captures the shift in the *whole output
+          distribution*; non-negative by construction.
+        - ``"pawn"`` — the CDF-based PAWN measure, also from an ``n``-run ensemble.
+
+        The moment-independent methods (``delta``/``pawn``) do not suffer the near-zero
+        negativity of variance decomposition and are cheaper (``n`` runs, not ``n*(d+2)``).
 
         Ranks the model's uncertain parameters by how much each drives the variance of an
         outcome (a variable of interest reduced over the simulated horizon), under a chosen
@@ -774,13 +788,24 @@ class SDM:
         """
         from . import gsa
 
+        if method not in ("sobol", "delta", "pawn"):
+            raise ValueError(f"method must be 'sobol', 'delta' or 'pawn', got {method!r}.")
+
         free, fixed = self._gsa_parameter_spec(bounds)
         if not free:
             raise ValueError("No free parameters to analyse (all are fixed or the model has none).")
         names = [e["name"] for e in free]
-        problem = gsa.sobol_problem(names, [(e["low"], e["high"]) for e in free])
-        design = gsa.sobol_sample(problem, n, second_order=second_order, seed=seed)
+        free_bounds = [(e["low"], e["high"]) for e in free]
         intensities = self._gsa_intensities(intervention)
+
+        if method == "sobol":
+            problem = gsa.sobol_problem(names, free_bounds)
+            design = gsa.sobol_sample(problem, n, second_order=second_order, seed=seed)
+        else:  # delta / pawn run on a plain Monte-Carlo (given-data) ensemble
+            rng = np.random.default_rng(seed)
+            lows = np.array([b[0] for b in free_bounds])
+            highs = np.array([b[1] for b in free_bounds])
+            design = rng.uniform(lows, highs, size=(int(n), len(free)))
 
         if reducer is not None:
             reducers = {"__reducer__": gsa.make_reducer(reducer=reducer)}
@@ -800,9 +825,14 @@ class SDM:
 
         results = {}
         for label in voi_labels:
-            df = gsa.sobol_analyze(problem, outputs[label], second_order=second_order,
-                                   n_bootstrap=n_bootstrap, conf_level=conf_level, seed=seed,
-                                   clip=clip)
+            if method == "sobol":
+                df = gsa.sobol_analyze(problem, outputs[label], second_order=second_order,
+                                       n_bootstrap=n_bootstrap, conf_level=conf_level, seed=seed,
+                                       clip=clip, ci=ci)
+            else:
+                df = gsa.moment_independent(design, outputs[label], names, method=method,
+                                            bounds=free_bounds, n_bootstrap=n_bootstrap,
+                                            conf_level=conf_level, seed=seed)
             df.attrs["fixed_parameters"] = self._gsa_fixed
             results[label] = df
 
