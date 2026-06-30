@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tutorial — Sensitivity & scenario discovery · Systems Insight Pipeline</title>
+<meta name="description" content="Pedagogical walkthrough of global sensitivity analysis (Sobol indices) and scenario discovery (PRIM/CART) in the Systems Insight Pipeline: which uncertain parameters drive the outcome, and which combinations of conditions produce a bad one.">
+<style>
+  :root {
+    --ink: #1c2733; --muted: #5a6b7b; --accent: #21618c; --accent-soft: #eaf2f8;
+    --card: #ffffff; --bg: #f5f7fa; --border: #dde4ec; --good: #1e8449; --warn: #b9770e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: var(--ink); background: var(--bg); line-height: 1.65; }
+  header { background: linear-gradient(135deg, #1a5276, #21618c 60%, #2980b9); color: #fff; padding: 2rem 1.5rem; }
+  header .crumb { font-size: 0.9rem; }
+  header .crumb a { color: #cfe3f3; text-decoration: none; }
+  header h1 { margin: 0.4rem 0 0.2rem; font-size: 1.9rem; }
+  header p { margin: 0.2rem 0 0; color: #d6e6f2; max-width: 52rem; }
+  main { max-width: 54rem; margin: 0 auto; padding: 2rem 1.5rem 1rem; }
+  h2 { color: var(--accent); margin-top: 2.8rem; display: flex; align-items: center; gap: 0.6rem; }
+  h2 .n { background: var(--accent); color: #fff; border-radius: 50%; width: 1.7rem; height: 1.7rem; display: inline-flex; align-items: center; justify-content: center; font-size: 1rem; flex: none; }
+  h3 { margin-top: 1.8rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; background: var(--card); font-size: 0.9rem; }
+  th, td { border: 1px solid var(--border); padding: 0.4rem 0.6rem; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); color: var(--accent); }
+  code { font-family: Consolas, "Courier New", monospace; background: var(--accent-soft); padding: 0.05rem 0.3rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: #102a3c; color: #e8f1f8; border-radius: 10px; padding: 1.1rem 1.3rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: inherit; }
+  pre.output { background: #f4f6f8; color: #1c2733; border: 1px solid var(--border); }
+  .callout { border-left: 4px solid var(--accent); background: var(--card); border-radius: 0 10px 10px 0; padding: 0.9rem 1.2rem; margin: 1.2rem 0; }
+  .callout.read { border-color: var(--good); }
+  .callout.read .t { color: var(--good); font-weight: 700; }
+  .callout .t { display: block; margin-bottom: 0.3rem; color: var(--accent); font-weight: 700; }
+  figure { margin: 1.4rem 0; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+  figure img { width: 100%; height: auto; border-radius: 6px; }
+  figcaption { font-size: 0.9rem; color: var(--muted); margin-top: 0.6rem; }
+  .pair { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 0.8rem 1.1rem; margin: 1.5rem 0; font-size: 0.95rem; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .grid2 .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.2rem; }
+  .grid2 .card h3 { margin-top: 0; color: var(--accent); }
+  footer { margin-top: 3rem; padding: 1.6rem; text-align: center; font-size: 0.88rem; color: var(--muted); border-top: 1px solid var(--border); background: var(--card); }
+  a { color: var(--accent); }
+  .next { display: flex; gap: 1rem; flex-wrap: wrap; margin: 2rem 0; }
+  .next a { flex: 1 1 14rem; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.2rem; text-decoration: none; color: var(--ink); }
+  .next a strong { color: var(--accent); display: block; margin-bottom: 0.2rem; }
+  @media (max-width: 640px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="crumb"><a href="index.html">Systems Insight Pipeline</a> / Tutorial</div>
+  <h1>Sensitivity &amp; scenario discovery</h1>
+  <p>Two standard uncertainty tools that round out the workflow: <em>which assumptions your
+  conclusion is most sensitive to</em> (global sensitivity analysis), and <em>which combinations of
+  conditions produce a bad outcome</em> (scenario discovery).</p>
+</header>
+
+<main>
+
+<div class="pair">
+  This builds directly on the <a href="tutorial-insulation.html">Insulation tutorial</a> and uses
+  the same SEVEN-project peak-energy model. Read that one first for the modelling workflow
+  (diagram → annotate → simulate → rank → optimize → loops). A runnable notebook version of this
+  page is in
+  <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/GSA_and_Scenario_Discovery.ipynb">tutorials/GSA_and_Scenario_Discovery.ipynb</a>.
+</div>
+
+<h2><span class="n">0</span>Where these fit</h2>
+
+<div class="grid2">
+  <div class="card">
+    <h3>Global sensitivity analysis</h3>
+    <p>Ranks the model's <strong>uncertain parameters</strong> by how much each drives the
+    <em>variance</em> of the outcome. Unlike intervention ranking (which ranks the <em>levers</em>
+    you could pull) and unlike one-factor-at-a-time analysis, it accounts for the full input ranges
+    and their <strong>interactions</strong> at once.</p>
+  </div>
+  <div class="card">
+    <h3>Scenario discovery</h3>
+    <p>Localises the <strong>region</strong> of the input space where an outcome of concern
+    concentrates — "under what combination of conditions does it go wrong?". The complement of GSA:
+    GSA ranks drivers globally; scenario discovery draws a box around the danger.</p>
+  </div>
+</div>
+
+<h2><span class="n">1</span>Global sensitivity analysis (Sobol)</h2>
+
+<p>Every causal link in a qualitative diagram has an uncertain strength. GSA asks: of all those
+uncertain strengths, which ones actually matter for the outcome? It draws a structured (Saltelli)
+sample over the parameters — the same uniform priors the simulator already uses — runs the model
+once per design point under a chosen intervention scenario, and decomposes the outcome variance
+into contributions per parameter.</p>
+
+<pre><code>from sip_systemsinsightpipeline import Extract, SDM
+from sip_systemsinsightpipeline.plots import plot_gsa
+
+s = Extract("Insulation_PeakEnergy.xlsx").extract_settings()
+s.seed = 0; s.N = 1; s.t_end = 15; s.time_unit = "years"
+s.parameter_value_aux = 0.3; s.parameter_value_stocks = 0.1
+sdm = SDM(s)
+voi = s.variable_of_interest[0]
+
+# total runs = n * (d + 2); keep n modest on a large model for a first look
+gsa_df = sdm.run_GSA(voi, n=128, seed=1)
+fig = plot_gsa(gsa_df, top=12)</code></pre>
+
+<p>The result is a tidy, ST-sorted table (one row per parameter):</p>
+<table>
+<tr><th>parameter (link strength)</th><th>S1</th><th>ST</th></tr>
+<tr><td>to Percentage of el... &larr; Willingness to adopt flexible elec...</td><td>0.418 &plusmn; 0.142</td><td><strong>0.394</strong> &plusmn; 0.109</td></tr>
+<tr><td>to Percentage of el... &larr; Percentage of electricity that is ...</td><td>0.231 &plusmn; 0.111</td><td><strong>0.229</strong> &plusmn; 0.062</td></tr>
+<tr><td>to Percentage of el... &larr; Degree of controllability of elect...</td><td>0.037 &plusmn; 0.065</td><td><strong>0.061</strong> &plusmn; 0.017</td></tr>
+<tr><td>to Percentage of el... &larr; Willingness to use smart appliances</td><td>0.054 &plusmn; 0.067</td><td><strong>0.058</strong> &plusmn; 0.015</td></tr>
+<tr><td>to Percentage of el... &larr; Willingness to adopt flexible elec...</td><td>-0.051 &plusmn; 0.041</td><td><strong>0.037</strong> &plusmn; 0.012</td></tr>
+<tr><td>to Preceived cost s... &larr; Percentage of electricity use duri...</td><td>0.014 &plusmn; 0.045</td><td><strong>0.029</strong> &plusmn; 0.012</td></tr>
+</table>
+
+<figure>
+  <img src="img/gsa_tornado.png" alt="Sobol tornado: total-order ST bars with first-order S1 markers for the top uncertain parameters">
+  <figcaption>Sobol tornado — total-order <code>ST</code> (bars) and first-order <code>S1</code>
+  (markers), with bootstrap confidence whiskers, for the 12 most influential link strengths.</figcaption>
+</figure>
+
+<div class="callout read">
+  <span class="t">How to read it</span>
+  <strong>S1</strong> (first-order) is the share of outcome variance a parameter explains on its
+  own; <strong>ST</strong> (total-order) also includes the variance it drives <em>through
+  interactions</em> with other parameters. So <code>ST &gt; S1</code> flags a parameter that matters
+  mainly in combination with others, while <code>ST ≈ S1</code> means it acts independently. The
+  parameters at the top are where measurement or elicitation effort would most sharpen your
+  conclusions. <strong>Wide whiskers mean <code>n</code> is too small</strong> — the indices are
+  noisy; raise <code>n</code> (total runs grow as <code>n·(d+2)</code>). As a sanity check,
+  <code>0 ≤ S1 ≤ ST ≤ 1</code> up to Monte-Carlo noise, and <code>ΣS1 ≤ 1</code>.
+</div>
+
+<div class="callout">
+  <span class="t">GSA vs the intervention ranking</span>
+  The <a href="tutorial-insulation.html">intervention ranking</a> answers "which lever should I
+  pull?"; GSA answers "which uncertain assumption should I pin down?". A link can be a strong driver
+  of variance (high ST) without being something you can act on — that is a measurement priority,
+  not an intervention.
+</div>
+
+<h2><span class="n">2</span>Scenario discovery (PRIM)</h2>
+
+<p>GSA ranks drivers globally. Scenario discovery instead <em>localises</em>: it draws an ensemble
+of parameter sets, labels the "cases of concern" (here: peak-hour use stays <strong>high</strong>
+despite the full intervention package), and finds an interpretable box of the input space where
+those cases concentrate.</p>
+
+<pre><code>from sip_systemsinsightpipeline import discover_scenarios
+from sip_systemsinsightpipeline.plots import plot_scenario_tradeoff, plot_scenario_box
+import numpy as np
+
+X, y = sdm.sample_outcomes(n=1500, seed=2)        # ensemble: inputs X, outcome y
+threshold = float(np.quantile(y, 0.8))            # worst 20% = "high peak use"
+
+result = discover_scenarios(X, y, threshold=threshold, direction="above",
+                            method="prim", peel_alpha=0.05, min_coverage=0.5)
+box = result.box
+print(box.limits)        # only the dimensions PRIM had to restrict</code></pre>
+
+<p>On the run shown here PRIM isolates a box with <strong>density 0.77</strong> (precision) and <strong>coverage 0.51</strong> (recall), restricting only <strong>9 of 94</strong> uncertain parameters (it holds 13% of all draws).</p>
+
+<div class="grid2">
+  <figure>
+    <img src="img/scenario_tradeoff.png" alt="PRIM coverage-density peeling trajectory">
+    <figcaption>The peeling trajectory: each step trades coverage for density.</figcaption>
+  </figure>
+  <figure>
+    <img src="img/scenario_box.png" alt="Scatter of the two most-restricted inputs coloured by concern, with the selected box">
+    <figcaption>The two most-restricted inputs, coloured by concern, with the selected box.</figcaption>
+  </figure>
+</div>
+
+<div class="callout read">
+  <span class="t">How to read it</span>
+  PRIM reports two numbers for every candidate box. <strong>Density</strong> (precision) is the
+  share of points <em>inside</em> the box that are cases of concern; <strong>coverage</strong>
+  (recall) is the share of <em>all</em> concerning cases the box captures. Peeling drives density
+  up by shrinking the box, which inevitably sheds coverage — the trade-off curve lets you choose.
+  Crucially, <code>box.limits</code> lists <strong>only the dimensions PRIM had to restrict</strong>:
+  those are the parameters whose values jointly produce the bad outcome. Every other input is left
+  unconstrained, and <em>that is the finding</em> — the danger does not depend on them. Read a box
+  as a sentence: "the concern concentrates when <em>these few</em> link strengths fall in
+  <em>these</em> ranges, regardless of everything else."
+</div>
+
+<h2><span class="n">3</span>CART: the same question as a tree</h2>
+
+<p>CART (a classification tree) is an alternative backend. It is good for cross-checking <em>which
+variables</em> matter and for regions that are not a single box:</p>
+
+<pre><code>res_cart = discover_scenarios(X, y, threshold=threshold, direction="above",
+                              method="cart", max_depth=3, min_density=0.7, seed=0)
+print(res_cart.splitting_variables)
+for rule in res_cart.rules[:3]:
+    print(rule)</code></pre>
+
+<pre class="output">Splitting variables: [smart-controlled] &lt;- Wil..., Percentage of electricity use during peak hours (16.00-21..., Percentage of electricity use during peak hours (16.00-21..., Percentage of electricity use during peak hours (16.00-21...
+
+[peak use] &lt;- [flexible-use willingness] &gt; -0.0273 and [peak use] &lt;- [smart-controlled] &gt; -0.03918 and [peak use] &lt;- [controllability] &gt; -0.06377  -&gt; density=0.920, coverage=0.345, mass=0.075</pre>
+
+<div class="callout read">
+  <span class="t">How to read it</span>
+  The <strong>splitting variables</strong> are the inputs the tree found informative — they should
+  echo PRIM's restricted dimensions and GSA's top parameters. Each <strong>rule</strong> is a path
+  to a high-density leaf, reported with the same density/coverage/mass. Where PRIM gives one box,
+  CART can give several rules (useful when the danger lives in more than one corner of the space).
+</div>
+
+<h2><span class="n">4</span>Putting it together</h2>
+
+<p>With the existing intervention ranking and Loops That Matter, these two tools complete SIP's
+"analyse → find leverage → stress-test robustness" loop: rank the levers, optimize the budget,
+attribute behaviour to loops, then ask <em>which assumptions the answer hinges on</em> (GSA) and
+<em>under what conditions it fails</em> (scenario discovery).</p>
+
+<h2><span class="n">5</span>References</h2>
+
+<ul>
+  <li>Saltelli, A. et al. (2008). <em>Global Sensitivity Analysis: The Primer.</em> Wiley.</li>
+  <li>Sobol', I. M. (2001). Global sensitivity indices for nonlinear mathematical models and their
+  Monte Carlo estimates. <em>Mathematics and Computers in Simulation</em>, 55(1-3), 271-280.</li>
+  <li>Friedman, J. H. &amp; Fisher, N. I. (1999). Bump hunting in high-dimensional data.
+  <em>Statistics and Computing</em>, 9(2), 123-143. (PRIM)</li>
+  <li>Kwakkel, J. H. &amp; Jaxa-Rozen, M. (2016). Improving scenario discovery for handling
+  heterogeneous uncertainties. <em>Environmental Modelling &amp; Software</em>, 79, 311-321.</li>
+  <li>Herman, J. &amp; Usher, W. (2017). SALib: An open-source Python library for sensitivity
+  analysis. <em>Journal of Open Source Software</em>, 2(9), 97.</li>
+</ul>
+
+<div class="next">
+  <a href="tutorial-insulation.html"><strong>← The Insulation tutorial</strong>
+  The modelling workflow this page builds on: ranking, optimization, Loops That Matter.</a>
+  <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/GSA_and_Scenario_Discovery.ipynb"><strong>Run it yourself →</strong>
+  This page as an executable notebook.</a>
+</div>
+
+</main>
+
+<footer>
+  <a href="index.html">Systems Insight Pipeline</a> ·
+  <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline">GitHub</a> ·
+  Models: <a href="https://seven.uva.nl/">SEVEN project</a> ·
+  Sensitivity via <a href="https://salib.readthedocs.io">SALib</a>
+</footer>
+
+</body>
+</html>

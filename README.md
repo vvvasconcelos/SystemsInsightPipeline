@@ -28,6 +28,12 @@ interface — but custom equations are supported when you need them.
   allocations, and scales to dozens of interventions. Maximize or minimize the outcome.
 - **Loops That Matter.** Scores every feedback loop's contribution to model behavior over time
   (Schoenberg–Davidsen–Eberlein method; [`LoopsThatMatter`](sip_systemsinsightpipeline/ltm.py)).
+- **Global sensitivity analysis.** Variance-based Sobol indices (first-order `S1` and total-order
+  `ST` with confidence intervals) ranking which uncertain parameters drive the outcome — including
+  interactions, unlike one-factor-at-a-time (`SDM.run_GSA`, `plots.plot_gsa`).
+- **Scenario discovery.** PRIM (vendored) and CART localise the combinations of conditions that
+  produce an outcome of concern as interpretable boxes/rules with density and coverage
+  (`discover_scenarios`, `SDM.sample_outcomes`).
 - **Custom equations.** Override the default linear link aggregation for any variable with an
   `Equation` column entry — sampled parameters, intervention placement, numpy functions (see
   below).
@@ -85,6 +91,7 @@ print(result["best_effect_size"], result["best_intensities"])
 |----------|---------------|
 | [`tutorials/Minimal.ipynb`](tutorials/Minimal.ipynb) | Start here: the Excel format and the full workflow on a 3-variable model (< 1 min) |
 | [`tutorials/Insulation.ipynb`](tutorials/Insulation.ipynb) | A real-world model of household peak energy use from the [SEVEN project](https://seven.uva.nl/): ranking, sensitivity analysis, budget minimization over 51 interventions, Loops That Matter |
+| [`tutorials/GSA_and_Scenario_Discovery.ipynb`](tutorials/GSA_and_Scenario_Discovery.ipynb) | Global sensitivity analysis (Sobol) and scenario discovery (PRIM/CART) on the insulation model: which assumptions drive the outcome, and which conditions make it go wrong |
 
 The Alzheimer's disease example from the D2D paper (see Citation) is available in the upstream
 [jerul/systemdynamics](https://github.com/jerul/systemdynamics) repository.
