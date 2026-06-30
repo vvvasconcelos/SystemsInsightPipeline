@@ -190,3 +190,73 @@ def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol 
     ax.margins(y=0.02)
     fig.tight_layout()
     return fig
+
+
+def plot_scenario_tradeoff(result, ax=None, title="Scenario discovery: coverage-density trade-off"):
+    """Plot the PRIM peeling trajectory in coverage-density space.
+
+    Each point is one peel step; peeling trades coverage (recall) for density (precision).
+    The selected (recommended) box is highlighted. matplotlib-only.
+    """
+    if result.trajectory is None:
+        raise ValueError("No peeling trajectory; plot_scenario_tradeoff applies to PRIM results.")
+    traj = result.trajectory
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 5))
+    else:
+        fig = ax.figure
+
+    ax.plot(traj["coverage"], traj["density"], "-o", color="#9ecae1",
+            markersize=4, lw=1.5, label="peeling trajectory", zorder=2)
+    chosen = result.box
+    ax.scatter([chosen.coverage], [chosen.density], s=110, color="#08519c",
+               edgecolor="white", zorder=3, label="recommended box")
+    ax.annotate(f"density={chosen.density:.2f}\ncoverage={chosen.coverage:.2f}",
+                (chosen.coverage, chosen.density), textcoords="offset points",
+                xytext=(8, -22), fontsize=9, color="#08519c")
+    ax.set_xlabel("Coverage  (recall — share of interesting cases captured)")
+    ax.set_ylabel("Density  (precision — share of box that is interesting)")
+    ax.set_title(title, loc="left", fontweight="bold")
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(min(traj["density"].min(), 0) - 0.02, 1.02)
+    ax.legend(loc="lower left", fontsize=9, framealpha=0.95)
+    fig.tight_layout()
+    return fig
+
+
+def plot_scenario_box(result, x_dim, y_dim, X, box=None, ax=None,
+                      title="Scenario discovery: input space"):
+    """Scatter two chosen inputs coloured by interesting/not, with the selected box drawn.
+
+    ``result`` is a ScenarioResult; ``X`` the input DataFrame used to build it. ``box`` defaults
+    to ``result.box``. Only the ``x_dim``/``y_dim`` edges of the box are drawn (a box may
+    restrict other dimensions too). matplotlib-only.
+    """
+    import matplotlib.patches as mpatches
+
+    box = box if box is not None else result.box
+    mask = np.asarray(result.mask, dtype=bool)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(6.5, 6))
+    else:
+        fig = ax.figure
+
+    ax.scatter(X[x_dim].values[~mask], X[y_dim].values[~mask], s=12, alpha=0.35,
+               color="#b0b8c1", label="not interesting", zorder=1)
+    ax.scatter(X[x_dim].values[mask], X[y_dim].values[mask], s=14, alpha=0.7,
+               color="#c0392b", label="interesting", zorder=2)
+
+    lim = box.limits
+    x_lo = lim.loc[x_dim, "min"] if x_dim in lim.index else X[x_dim].min()
+    x_hi = lim.loc[x_dim, "max"] if x_dim in lim.index else X[x_dim].max()
+    y_lo = lim.loc[y_dim, "min"] if y_dim in lim.index else X[y_dim].min()
+    y_hi = lim.loc[y_dim, "max"] if y_dim in lim.index else X[y_dim].max()
+    ax.add_patch(mpatches.Rectangle((x_lo, y_lo), x_hi - x_lo, y_hi - y_lo,
+                 fill=False, edgecolor="#08519c", lw=2.2, zorder=3, label="selected box"))
+
+    ax.set_xlabel(x_dim)
+    ax.set_ylabel(y_dim)
+    ax.set_title(title, loc="left", fontweight="bold")
+    ax.legend(loc="best", fontsize=9, framealpha=0.95)
+    fig.tight_layout()
+    return fig

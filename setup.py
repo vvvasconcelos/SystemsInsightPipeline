@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='sip_systemsinsightpipeline',
-    version='0.2.1',
+    version='0.3.0',
     description=(
         'Systems Insight Pipeline (SIP): convert causal loop diagrams from Kumu '
         'Excel exports into computational system dynamics models; simulate, '
@@ -26,6 +26,8 @@ setup(
         'openpyxl>=3.1.0',
         'tqdm',
         'tabulate>=0.8.9',
+        'SALib>=1.4',
+        'scikit-learn>=1.0',
     ],
     extras_require={
         'dev': [

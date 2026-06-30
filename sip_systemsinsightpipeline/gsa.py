@@ -31,8 +31,7 @@ def _require_salib():
         from SALib.sample import sobol as _sample
     except ImportError as exc:  # pragma: no cover - exercised only without SALib
         raise ImportError(
-            "Global sensitivity analysis requires SALib. Install it with "
-            "`pip install SALib` (or `pip install sip_systemsinsightpipeline[analysis]`)."
+            "Global sensitivity analysis requires SALib. Install it with `pip install SALib`."
         ) from exc
     return _sample, _analyze
 
