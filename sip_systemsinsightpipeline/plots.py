@@ -148,7 +148,8 @@ def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol 
     Parameters
     ----------
     gsa_df : pandas.DataFrame
-        Output of :meth:`SDM.run_GSA` — columns ``parameter, S1, S1_conf, ST, ST_conf``.
+        Output of :meth:`SDM.run_GSA`. Uses the asymmetric ``*_low`` / ``*_high`` confidence
+        bounds when present (falling back to the symmetric ``*_conf`` half-width otherwise).
     kind : str
         Only ``"tornado"`` is currently supported (kept for forward compatibility).
     top : int, optional
@@ -173,18 +174,31 @@ def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol 
     else:
         fig = ax.figure
 
+    def asym_err(point_col, low_col, high_col, conf_col):
+        """Return a 2xN [lower, upper] error array from asymmetric bounds if available."""
+        point = df[point_col].values
+        if low_col in df.columns and high_col in df.columns:
+            lower = np.clip(point - df[low_col].values, 0, None)
+            upper = np.clip(df[high_col].values - point, 0, None)
+            return np.vstack([lower, upper])
+        half = df[conf_col].values
+        return np.vstack([half, half])
+
     st_color = "#9ecae1"
     s1_color = "#08519c"
     ax.barh(y, df["ST"], height=0.6, color=st_color, edgecolor="white",
-            xerr=df["ST_conf"], error_kw=dict(ecolor="#5a6b7b", lw=1, capsize=3),
+            xerr=asym_err("ST", "ST_low", "ST_high", "ST_conf"),
+            error_kw=dict(ecolor="#5a6b7b", lw=1, capsize=3),
             label="ST  (total effect, incl. interactions)", zorder=2)
-    ax.errorbar(df["S1"], y, xerr=df["S1_conf"], fmt="o", color=s1_color,
-                markersize=5, lw=1, capsize=3, label="S1  (first-order effect)", zorder=3)
+    ax.errorbar(df["S1"], y, xerr=asym_err("S1", "S1_low", "S1_high", "S1_conf"),
+                fmt="o", color=s1_color, markersize=5, lw=1, capsize=3,
+                label="S1  (first-order effect)", zorder=3)
 
     ax.set_yticks(y)
     ax.set_yticklabels(df["parameter"])
     ax.set_xlabel("Sobol sensitivity index")
     ax.set_title(title, loc="left", fontweight="bold")
+    ax.set_xlim(left=min(0, ax.get_xlim()[0]))
     ax.axvline(0, color="#888888", lw=0.8)
     ax.legend(loc="lower right", fontsize=9, framealpha=0.95)
     ax.margins(y=0.02)

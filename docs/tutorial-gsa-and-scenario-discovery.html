@@ -108,13 +108,13 @@ fig = plot_gsa(gsa_df, top=12)</code></pre>
 
 <p>The result is a tidy, ST-sorted table (one row per parameter):</p>
 <table>
-<tr><th>parameter (link strength)</th><th>S1</th><th>ST</th></tr>
-<tr><td>to Percentage of el... &larr; Willingness to adopt flexible elec...</td><td>0.418 &plusmn; 0.142</td><td><strong>0.394</strong> &plusmn; 0.109</td></tr>
-<tr><td>to Percentage of el... &larr; Percentage of electricity that is ...</td><td>0.231 &plusmn; 0.111</td><td><strong>0.229</strong> &plusmn; 0.062</td></tr>
-<tr><td>to Percentage of el... &larr; Degree of controllability of elect...</td><td>0.037 &plusmn; 0.065</td><td><strong>0.061</strong> &plusmn; 0.017</td></tr>
-<tr><td>to Percentage of el... &larr; Willingness to use smart appliances</td><td>0.054 &plusmn; 0.067</td><td><strong>0.058</strong> &plusmn; 0.015</td></tr>
-<tr><td>to Percentage of el... &larr; Willingness to adopt flexible elec...</td><td>-0.051 &plusmn; 0.041</td><td><strong>0.037</strong> &plusmn; 0.012</td></tr>
-<tr><td>to Preceived cost s... &larr; Percentage of electricity use duri...</td><td>0.014 &plusmn; 0.045</td><td><strong>0.029</strong> &plusmn; 0.012</td></tr>
+<tr><th>parameter (link strength)</th><th>S1 [95% CI]</th><th>ST [95% CI]</th></tr>
+<tr><td>to Percentage of el... &larr; Willingness to adopt flexible elec...</td><td>0.418 [0.29, 0.58]</td><td><strong>0.394</strong> [0.31, 0.51]</td></tr>
+<tr><td>to Percentage of el... &larr; Percentage of electricity that is ...</td><td>0.231 [0.13, 0.34]</td><td><strong>0.229</strong> [0.19, 0.29]</td></tr>
+<tr><td>to Percentage of el... &larr; Degree of controllability of elect...</td><td>0.037 [0.00, 0.11]</td><td><strong>0.061</strong> [0.05, 0.08]</td></tr>
+<tr><td>to Percentage of el... &larr; Willingness to use smart appliances</td><td>0.054 [0.00, 0.12]</td><td><strong>0.058</strong> [0.04, 0.07]</td></tr>
+<tr><td>to Percentage of el... &larr; Willingness to adopt flexible elec...</td><td>0.000 [0.00, 0.00]</td><td><strong>0.037</strong> [0.03, 0.05]</td></tr>
+<tr><td>to Preceived cost s... &larr; Percentage of electricity use duri...</td><td>0.014 [0.00, 0.06]</td><td><strong>0.029</strong> [0.02, 0.04]</td></tr>
 </table>
 
 <figure>
@@ -131,8 +131,23 @@ fig = plot_gsa(gsa_df, top=12)</code></pre>
   mainly in combination with others, while <code>ST ≈ S1</code> means it acts independently. The
   parameters at the top are where measurement or elicitation effort would most sharpen your
   conclusions. <strong>Wide whiskers mean <code>n</code> is too small</strong> — the indices are
-  noisy; raise <code>n</code> (total runs grow as <code>n·(d+2)</code>). As a sanity check,
-  <code>0 ≤ S1 ≤ ST ≤ 1</code> up to Monte-Carlo noise, and <code>ΣS1 ≤ 1</code>.
+  noisy; raise <code>n</code> (total runs grow as <code>n·(d+2)</code>).
+</div>
+
+<div class="callout">
+  <span class="t">A note on the estimator and the bars (why an index of exactly 0)</span>
+  Sobol indices are mathematically in <code>[0, 1]</code>, but their estimator is a difference of
+  variance estimates, so for an <em>unimportant</em> parameter (true index ≈ 0) the raw estimate
+  can dip slightly below zero at finite <code>n</code> — a sampling artifact, not a real negative
+  effect. SIP therefore <strong>projects the estimate and its confidence interval onto
+  <code>[0, 1]</code></strong> (the <code>clip=True</code> default of <code>run_GSA</code>): such a
+  parameter reports <code>S1 = 0</code> with a one-sided interval like <code>[0, 0.05]</code> —
+  read as "indistinguishable from zero." The whiskers are an <strong>asymmetric percentile
+  bootstrap</strong> interval, not a symmetric <code>±</code> band, because the sampling
+  distribution of an index is skewed near the 0/1 boundaries. Pass <code>clip=False</code> to see
+  the raw, unconstrained estimates — a useful convergence check, since large negative excursions
+  are a direct signal that <code>n</code> is too small. As an identity, <code>S1 ≤ ST ≤ 1</code> and
+  <code>ΣS1 ≤ 1</code> hold in expectation.
 </div>
 
 <div class="callout">

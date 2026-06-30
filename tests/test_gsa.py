@@ -52,6 +52,30 @@ def test_engine_zero_variance_raises():
         gsa.sobol_analyze(problem, Y)
 
 
+def test_clip_enforces_unit_interval_and_asymmetric_ci():
+    """clip=True projects a true-zero index (Ishigami x3) onto [0,1] with an asymmetric CI;
+    clip=False preserves the raw (possibly negative) estimate as a diagnostic."""
+    Ishigami = pytest.importorskip("SALib.test_functions.Ishigami")
+    names = ["x1", "x2", "x3"]
+    bounds = [(-np.pi, np.pi)] * 3
+    f = lambda r: Ishigami.evaluate(r.reshape(1, -1))[0]
+
+    clipped, _, _ = gsa.run_sobol(names, bounds, f, n=128, seed=3, clip=True)
+    # every index and every lower CI bound is within [0, 1]
+    assert (clipped["S1"] >= 0).all() and (clipped["S1"] <= 1).all()
+    assert (clipped["S1_low"] >= 0).all() and (clipped["ST_low"] >= 0).all()
+    assert (clipped["S1_low"] <= clipped["S1"] + 1e-9).all()
+    assert (clipped["S1"] <= clipped["S1_high"] + 1e-9).all()
+    # the true-zero parameter clips to exactly 0 with a one-sided interval
+    x3 = clipped.set_index("parameter").loc["x3"]
+    assert x3["S1"] == 0.0
+    assert x3["S1_low"] == 0.0 and x3["S1_high"] > 0.0
+
+    raw, _, _ = gsa.run_sobol(names, bounds, f, n=128, seed=3, clip=False)
+    # at this small n the raw estimator for x3 dips below zero (the diagnostic clip removes)
+    assert raw.set_index("parameter").loc["x3", "S1"] < 0.0
+
+
 # --------------------------------------------------------------------------- SDM models
 
 def _settings(path, seed=0, **over):
@@ -102,7 +126,8 @@ def test_run_gsa_stock_model_symmetric(tmp_path):
     sdm = SDM(_settings(tmp_path / "stock.xlsx"))
     df = sdm.run_GSA(n=256, seed=1, show_progress=False)
 
-    assert list(df.columns) == ["parameter", "S1", "S1_conf", "ST", "ST_conf"]
+    for col in ("parameter", "S1", "S1_low", "S1_high", "S1_conf", "ST", "ST_low", "ST_high", "ST_conf"):
+        assert col in df.columns
     assert set(df["parameter"]) == {"Outcome <- DriverA", "Outcome <- DriverB"}
     assert (df["S1"] <= df["ST"] + 0.06).all()
     assert (df["ST"] <= 1.05).all()

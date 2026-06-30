@@ -64,14 +64,31 @@ def sobol_sample(problem: Dict, n: int = 1024, *, second_order: bool = False,
 
 def sobol_analyze(problem: Dict, Y: np.ndarray, *, second_order: bool = False,
                   n_bootstrap: int = 200, conf_level: float = 0.95,
-                  seed: Optional[int] = None) -> pd.DataFrame:
+                  seed: Optional[int] = None, clip: bool = True) -> pd.DataFrame:
     """Estimate Sobol indices from model outputs ``Y`` and return a tidy DataFrame.
 
-    Columns: ``parameter, S1, S1_conf, ST, ST_conf`` (sorted by ``ST`` descending). The
-    ``*_conf`` columns are the half-width of the bootstrap confidence interval at
-    ``conf_level``. If ``second_order`` is True, the pairwise ``S2`` matrix is attached on
-    the returned frame as ``.attrs['S2']`` / ``.attrs['S2_conf']`` (DataFrames indexed by
-    parameter name).
+    Columns (sorted by ``ST`` descending): ``parameter``, ``S1``, ``S1_low``, ``S1_high``,
+    ``S1_conf``, ``ST``, ``ST_low``, ``ST_high``, ``ST_conf``.
+
+    - ``S1`` / ``ST`` are the point estimates.
+    - ``*_low`` / ``*_high`` are an **asymmetric percentile bootstrap** confidence interval at
+      ``conf_level`` (the 100·(1-conf)/2 and 100·(1+conf)/2 percentiles of the bootstrap
+      replicates). This is more faithful than a symmetric ``±`` band because the sampling
+      distribution of a Sobol index is skewed near the 0/1 boundaries.
+    - ``*_conf`` is the symmetric half-width ``(high - low) / 2``, kept for quick reading and
+      backward compatibility.
+
+    Sobol indices are mathematically bounded to ``[0, 1]``, but their unbiased estimators are
+    differences of variance estimates and can fall slightly outside that range for an
+    unimportant parameter (true index ≈ 0) at finite sample size. With ``clip=True`` (default)
+    the point estimate and the bootstrap replicates are **projected onto ``[0, 1]``** before
+    summarising, so an uninformative parameter reports ``S1 = 0`` with an interval like
+    ``[0, 0.05]`` ("indistinguishable from zero") rather than a spurious confidently-negative
+    value. Pass ``clip=False`` for the raw, unconstrained estimates (useful as a convergence
+    diagnostic: large negative excursions signal that ``n`` is too small).
+
+    If ``second_order`` is True, the pairwise ``S2`` matrix and its bootstrap half-width are
+    attached on the returned frame as ``.attrs['S2']`` / ``.attrs['S2_conf']``.
     """
     _, analyze = _require_salib()
     Y = np.asarray(Y, dtype=float).ravel()
@@ -86,19 +103,45 @@ def sobol_analyze(problem: Dict, Y: np.ndarray, *, second_order: bool = False,
 
     Si = analyze.analyze(problem, Y, calc_second_order=bool(second_order),
                          num_resamples=int(n_bootstrap), conf_level=float(conf_level),
-                         seed=seed, print_to_console=False)
+                         seed=seed, keep_resamples=True, print_to_console=False)
+
+    lo_pct = 100.0 * (1.0 - conf_level) / 2.0
+    hi_pct = 100.0 * (1.0 + conf_level) / 2.0
+
+    def summarise(point_key, resample_key, z_conf_key):
+        point = np.asarray(Si[point_key], dtype=float)
+        reps = Si.get(resample_key)
+        if reps is not None:
+            reps = np.asarray(reps, dtype=float)            # shape (n_bootstrap, d)
+            if clip:
+                point = np.clip(point, 0.0, 1.0)
+                reps = np.clip(reps, 0.0, 1.0)
+            low = np.percentile(reps, lo_pct, axis=0)
+            high = np.percentile(reps, hi_pct, axis=0)
+        else:  # SALib too old to return resamples: fall back to the symmetric band
+            half = np.asarray(Si[z_conf_key], dtype=float)
+            if clip:
+                point = np.clip(point, 0.0, 1.0)
+            low, high = point - half, point + half
+            if clip:
+                low, high = np.clip(low, 0.0, 1.0), np.clip(high, 0.0, 1.0)
+        return point, low, high, (high - low) / 2.0
+
+    s1, s1_low, s1_high, s1_conf = summarise("S1", "S1_conf_all", "S1_conf")
+    st, st_low, st_high, st_conf = summarise("ST", "ST_conf_all", "ST_conf")
 
     df = pd.DataFrame({
         "parameter": problem["names"],
-        "S1": np.asarray(Si["S1"], dtype=float),
-        "S1_conf": np.asarray(Si["S1_conf"], dtype=float),
-        "ST": np.asarray(Si["ST"], dtype=float),
-        "ST_conf": np.asarray(Si["ST_conf"], dtype=float),
+        "S1": s1, "S1_low": s1_low, "S1_high": s1_high, "S1_conf": s1_conf,
+        "ST": st, "ST_low": st_low, "ST_high": st_high, "ST_conf": st_conf,
     }).sort_values("ST", ascending=False, ignore_index=True)
 
     if second_order:
         names = problem["names"]
-        df.attrs["S2"] = pd.DataFrame(np.asarray(Si["S2"], dtype=float), index=names, columns=names)
+        s2 = np.asarray(Si["S2"], dtype=float)
+        if clip:
+            s2 = np.clip(s2, 0.0, 1.0)
+        df.attrs["S2"] = pd.DataFrame(s2, index=names, columns=names)
         df.attrs["S2_conf"] = pd.DataFrame(np.asarray(Si["S2_conf"], dtype=float), index=names, columns=names)
     return df
 
@@ -106,7 +149,7 @@ def sobol_analyze(problem: Dict, Y: np.ndarray, *, second_order: bool = False,
 def run_sobol(names: Sequence[str], bounds: Sequence[Tuple[float, float]],
               evaluate: Callable[[np.ndarray], float], *, n: int = 1024,
               second_order: bool = False, n_bootstrap: int = 200,
-              conf_level: float = 0.95, seed: Optional[int] = None,
+              conf_level: float = 0.95, seed: Optional[int] = None, clip: bool = True,
               progress: Optional[Callable[[int, int], None]] = None) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray]:
     """End-to-end Sobol analysis: sample -> evaluate -> analyze.
 
@@ -122,7 +165,7 @@ def run_sobol(names: Sequence[str], bounds: Sequence[Tuple[float, float]],
         if progress is not None:
             progress(i + 1, total)
     indices = sobol_analyze(problem, outputs, second_order=second_order,
-                            n_bootstrap=n_bootstrap, conf_level=conf_level, seed=seed)
+                            n_bootstrap=n_bootstrap, conf_level=conf_level, seed=seed, clip=clip)
     return indices, design, outputs
 
 

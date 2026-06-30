@@ -731,7 +731,7 @@ class SDM:
 
     def run_GSA(self, variable_of_interest=None, *, bounds=None, n=1024,
                 second_order=False, outcome="final", reducer=None, intervention=None,
-                n_bootstrap=200, conf_level=0.95, seed=None, show_progress=True):
+                n_bootstrap=200, conf_level=0.95, clip=True, seed=None, show_progress=True):
         """Variance-based (Sobol) global sensitivity analysis of the model's parameters.
 
         Ranks the model's uncertain parameters by how much each drives the variance of an
@@ -757,12 +757,18 @@ class SDM:
         intervention : None | str | dict | array-like
             Scenario under which the outcome is measured (see ``_gsa_intensities``).
         n_bootstrap, conf_level, seed : estimator controls.
+        clip : bool
+            If True (default), project the indices and their bootstrap confidence intervals
+            onto the valid ``[0, 1]`` range, so an unimportant parameter reports ``S1 = 0`` with
+            an asymmetric interval like ``[0, 0.05]`` rather than a spurious negative value. Pass
+            ``clip=False`` for the raw estimates as a convergence diagnostic. See ``gsa.sobol_analyze``.
 
         Returns
         -------
         pandas.DataFrame or dict[str, pandas.DataFrame]
-            One tidy frame (``parameter, S1, S1_conf, ST, ST_conf``, sorted by ``ST``) per VOI;
-            a single frame for one VOI or a custom reducer, else a ``{voi: frame}`` dict. The
+            One tidy frame per VOI (``parameter, S1, S1_low, S1_high, S1_conf, ST, ST_low,
+            ST_high, ST_conf``, sorted by ``ST``); a single frame for one VOI or a custom
+            reducer, else a ``{voi: frame}`` dict with asymmetric percentile CIs. The
             raw design and outputs are cached on ``self._gsa_design`` / ``self._gsa_outputs``,
             and the fixed parameters on ``self._gsa_fixed``.
         """
@@ -795,7 +801,8 @@ class SDM:
         results = {}
         for label in voi_labels:
             df = gsa.sobol_analyze(problem, outputs[label], second_order=second_order,
-                                   n_bootstrap=n_bootstrap, conf_level=conf_level, seed=seed)
+                                   n_bootstrap=n_bootstrap, conf_level=conf_level, seed=seed,
+                                   clip=clip)
             df.attrs["fixed_parameters"] = self._gsa_fixed
             results[label] = df
 

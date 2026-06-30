@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name='sip_systemsinsightpipeline',
-    version='0.3.0',
+    version='0.3.1',
     description=(
         'Systems Insight Pipeline (SIP): convert causal loop diagrams from Kumu '
         'Excel exports into computational system dynamics models; simulate, '
