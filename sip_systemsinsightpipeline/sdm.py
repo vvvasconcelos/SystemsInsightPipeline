@@ -579,6 +579,265 @@ class SDM:
         self.params = params
         return params
 
+    # =========================================================================
+    # Global sensitivity analysis (Sobol) and ensemble sampling
+    #
+    # These reuse the uniform priors that sample_model_parameters draws from, but
+    # map a flat design vector deterministically into the nested params dict so a
+    # Saltelli/Sobol design can be evaluated. See gsa.py for the index estimator.
+    # =========================================================================
+
+    def _gsa_parameter_spec(self, bounds=None):
+        """Enumerate the model's free (uncertain) parameters with their sampling bounds.
+
+        Returns ``(free, fixed)`` lists of entry dicts. Each entry records where the value
+        belongs in the nested ``params`` dict (``target`` + ``kind`` + ``key``) and its
+        ``(low, high)`` bounds. The bounds mirror exactly what ``sample_model_parameters``
+        draws from, so a GSA samples the same prior:
+
+        - link coefficient of a non-equation stock/auxiliary: known polarity ``+`` -> ``(0, pv)``,
+          ``-`` -> ``(-pv, 0)``, unknown -> ``(-pv, pv)``, with ``pv = parameter_value_stocks``
+          for stocks and ``parameter_value_aux`` for auxiliaries;
+        - each ``#`` parameter of a custom equation: ``(0, parameter_value_aux)``;
+        - interaction terms (only when the model has them) mirror the same formulas at half range.
+
+        Equation variables contribute only their ``#`` parameters (their incoming-link
+        coefficients are stripped before simulation, so they do not affect the outcome).
+        ``bounds`` is an optional ``{name: (low, high)}`` override; a parameter whose final
+        bounds satisfy ``low == high`` is treated as fixed and reported separately.
+        """
+        bounds = bounds or {}
+        entries = []
+
+        def add(name, low, high, kind, target, key):
+            low, high = bounds.get(name, (low, high))
+            entries.append({"name": name, "low": float(low), "high": float(high),
+                            "kind": kind, "target": target, "key": key})
+
+        for var in self.stocks_and_auxiliaries:
+            is_stock = var in self.stocks
+            pv = self.parameter_value_stocks if is_stock else self.parameter_value_aux
+            has_eq = bool(self._equation_evaluator) and self._equation_evaluator.has_custom_equation(var)
+
+            if has_eq:
+                for idx in self.equations[var]["parameter_indices"]:
+                    add(f"{var} | #{idx}", 0.0, self.parameter_value_aux, "eq", var, f"#{idx}")
+                continue
+
+            i = self.variables.index(var)
+            for j, var_2 in enumerate(self.variables):
+                pol = self.df_adj.loc[var, var_2]
+                if pol == 0:
+                    continue
+                if pol == -999:
+                    lo, hi = -pv, pv
+                elif pol > 0:
+                    lo, hi = 0.0, pv
+                else:
+                    lo, hi = -pv, 0.0
+                add(f"{var} <- {var_2}", lo, hi, "link", var, var_2)
+
+                if self.interaction_terms:
+                    for k, var_3 in enumerate(self.variables):
+                        ival = self.interactions_matrix[i, j, k]
+                        if ival == 0:
+                            continue
+                        if pol == -999:
+                            lo_i, hi_i = -pv, 0.0
+                        elif ival > 0:
+                            lo_i, hi_i = 0.0, pv / 2
+                        else:
+                            lo_i, hi_i = -pv / 2, 0.0
+                        key = var_2 + " * " + var_3
+                        add(f"{var} <- {key}", lo_i, hi_i, "interaction", var, key)
+
+        free = [e for e in entries if e["high"] > e["low"]]
+        fixed = [e for e in entries if e["high"] <= e["low"]]
+        return free, fixed
+
+    def _gsa_params_from_vector(self, vec, free, fixed):
+        """Build the nested ``params`` dict from a flat design row (mirrors the post-strip
+        structure ``run_simulations`` produces for equation models)."""
+        params = {var: {"Intercept": 0} for var in self.stocks_and_auxiliaries}
+        # Equation variables: an (initially empty) eq-params dict plus zeroed incoming links.
+        for var in self.stocks_and_auxiliaries:
+            if self._equation_evaluator and self._equation_evaluator.has_custom_equation(var):
+                params[var][f"__eq_params_{var}__"] = {}
+                for var_2 in self.variables:
+                    if self.df_adj.loc[var, var_2] != 0:
+                        params[var][var_2] = 0.0
+
+        def place(entry, value):
+            target = entry["target"]
+            if entry["kind"] == "eq":
+                params[target][f"__eq_params_{target}__"][entry["key"]] = float(value)
+            else:  # link or interaction
+                params[target][entry["key"]] = float(value)
+
+        for entry, value in zip(free, np.asarray(vec, dtype=float)):
+            place(entry, value)
+        for entry in fixed:
+            place(entry, entry["low"])
+        return params
+
+    def _gsa_intensities(self, intervention):
+        """Resolve the intervention scenario to an intensity per intervention variable.
+
+        ``None`` applies every intervention at unit intensity (a reference "full package"
+        scenario, guaranteeing a non-degenerate outcome if any lever affects the VOI); a
+        string applies that single lever; a dict maps lever names to intensities; an
+        array-like is used as-is (length must match ``intervention_variables``).
+        """
+        n = len(self.intervention_variables)
+        if intervention is None:
+            return np.ones(n)
+        if isinstance(intervention, str):
+            if intervention not in self.intervention_variables:
+                raise ValueError(f"'{intervention}' is not an intervention variable.")
+            out = np.zeros(n)
+            out[self.intervention_variables.index(intervention)] = 1.0
+            return out
+        if isinstance(intervention, dict):
+            out = np.zeros(n)
+            for name, val in intervention.items():
+                if name not in self.intervention_variables:
+                    raise ValueError(f"'{name}' is not an intervention variable.")
+                out[self.intervention_variables.index(name)] = float(val)
+            return out
+        out = np.asarray(intervention, dtype=float)
+        if out.shape != (n,):
+            raise ValueError(f"intervention array must have length {n}, got {out.shape}.")
+        return out
+
+    def _gsa_evaluate(self, design, free, fixed, intensities, reducers, show_progress):
+        """Run the model once per design row and reduce to one scalar per reducer.
+
+        ``reducers`` is a dict ``{label: callable(df_solution) -> float}``; returns a dict
+        ``{label: np.ndarray}`` of outputs aligned with ``design``.
+        """
+        outputs = {label: np.empty(design.shape[0], dtype=float) for label in reducers}
+        iterator = range(design.shape[0])
+        if show_progress:
+            iterator = tqdm(iterator, desc="GSA: evaluating Sobol design")
+        # The per-run ">10" notice in run_SDM would flood thousands of lines; quiet stdout.
+        import contextlib, io
+        with contextlib.redirect_stdout(io.StringIO()):
+            for row_idx in iterator:
+                params = self._gsa_params_from_vector(design[row_idx], free, fixed)
+                df_sol = self.run_SDM_with_intervention_intensities(intensities, params)
+                for label, reduce_fn in reducers.items():
+                    outputs[label][row_idx] = float(reduce_fn(df_sol))
+        return outputs
+
+    def run_GSA(self, variable_of_interest=None, *, bounds=None, n=1024,
+                second_order=False, outcome="final", reducer=None, intervention=None,
+                n_bootstrap=200, conf_level=0.95, seed=None, show_progress=True):
+        """Variance-based (Sobol) global sensitivity analysis of the model's parameters.
+
+        Ranks the model's uncertain parameters by how much each drives the variance of an
+        outcome (a variable of interest reduced over the simulated horizon), under a chosen
+        intervention scenario. Returns first-order ``S1`` and total-order ``ST`` Sobol indices
+        with bootstrap confidence intervals.
+
+        Parameters
+        ----------
+        variable_of_interest : str or list[str], optional
+            Outcome variable(s); defaults to ``self.variable_of_interest``. Ignored when a
+            custom ``reducer`` is supplied.
+        bounds : dict, optional
+            ``{parameter_name: (low, high)}`` overrides of the default uniform priors. Use
+            ``low == high`` to fix a parameter (excluded from the indices and reported).
+        n : int
+            Base Sobol sample size; total model runs = ``n*(d+2)`` (``n*(2d+2)`` with
+            ``second_order``), where ``d`` is the number of free parameters. Use a power of two.
+        outcome : {"final", "mean", "min", "max"}
+            How to reduce each run's VOI trajectory to a scalar (default the final value).
+        reducer : callable, optional
+            ``callable(df_solution) -> float`` overriding ``outcome`` (and ``variable_of_interest``).
+        intervention : None | str | dict | array-like
+            Scenario under which the outcome is measured (see ``_gsa_intensities``).
+        n_bootstrap, conf_level, seed : estimator controls.
+
+        Returns
+        -------
+        pandas.DataFrame or dict[str, pandas.DataFrame]
+            One tidy frame (``parameter, S1, S1_conf, ST, ST_conf``, sorted by ``ST``) per VOI;
+            a single frame for one VOI or a custom reducer, else a ``{voi: frame}`` dict. The
+            raw design and outputs are cached on ``self._gsa_design`` / ``self._gsa_outputs``,
+            and the fixed parameters on ``self._gsa_fixed``.
+        """
+        from . import gsa
+
+        free, fixed = self._gsa_parameter_spec(bounds)
+        if not free:
+            raise ValueError("No free parameters to analyse (all are fixed or the model has none).")
+        names = [e["name"] for e in free]
+        problem = gsa.sobol_problem(names, [(e["low"], e["high"]) for e in free])
+        design = gsa.sobol_sample(problem, n, second_order=second_order, seed=seed)
+        intensities = self._gsa_intensities(intervention)
+
+        if reducer is not None:
+            reducers = {"__reducer__": gsa.make_reducer(reducer=reducer)}
+            voi_labels = ["__reducer__"]
+        else:
+            voi_list = variable_of_interest if variable_of_interest is not None else self.variable_of_interest
+            if isinstance(voi_list, str):
+                voi_list = [voi_list]
+            reducers = {voi: gsa.make_reducer(outcome=outcome, voi=voi) for voi in voi_list}
+            voi_labels = list(voi_list)
+
+        outputs = self._gsa_evaluate(design, free, fixed, intensities, reducers, show_progress)
+
+        self._gsa_design = pd.DataFrame(design, columns=names)
+        self._gsa_outputs = {k: v for k, v in outputs.items()}
+        self._gsa_fixed = {e["name"]: e["low"] for e in fixed}
+
+        results = {}
+        for label in voi_labels:
+            df = gsa.sobol_analyze(problem, outputs[label], second_order=second_order,
+                                   n_bootstrap=n_bootstrap, conf_level=conf_level, seed=seed)
+            df.attrs["fixed_parameters"] = self._gsa_fixed
+            results[label] = df
+
+        if reducer is not None or len(voi_labels) == 1:
+            return results[voi_labels[0]]
+        return results
+
+    def sample_outcomes(self, n=1000, *, variable_of_interest=None, bounds=None,
+                        outcome="final", reducer=None, intervention=None, seed=None,
+                        show_progress=True):
+        """Draw an ensemble of free-parameter samples and their scalar outcomes.
+
+        Returns ``(X, y)`` where ``X`` is an ``n x d`` DataFrame of sampled free parameters
+        (columns named as in :meth:`run_GSA`) and ``y`` is the length-``n`` outcome array,
+        reduced exactly as in ``run_GSA``. Convenience producer of the ensemble that
+        :func:`discover_scenarios` consumes. Uses plain Monte-Carlo (uniform) draws, not a
+        Sobol design, so the rows are independent.
+        """
+        from . import gsa
+
+        free, fixed = self._gsa_parameter_spec(bounds)
+        if not free:
+            raise ValueError("No free parameters to sample (all are fixed or the model has none).")
+        names = [e["name"] for e in free]
+        rng = np.random.default_rng(seed)
+        lows = np.array([e["low"] for e in free])
+        highs = np.array([e["high"] for e in free])
+        design = rng.uniform(lows, highs, size=(int(n), len(free)))
+        intensities = self._gsa_intensities(intervention)
+
+        if reducer is not None:
+            reduce_fn = gsa.make_reducer(reducer=reducer)
+        else:
+            voi = variable_of_interest if variable_of_interest is not None else self.variable_of_interest
+            if isinstance(voi, (list, tuple)):
+                voi = voi[0]
+            reduce_fn = gsa.make_reducer(outcome=outcome, voi=voi)
+
+        outputs = self._gsa_evaluate(design, free, fixed, intensities,
+                                     {"y": reduce_fn}, show_progress)
+        return pd.DataFrame(design, columns=names), outputs["y"]
+
     def analytical_solution(self, t, x0, A, b):
         """ Analytical solution for a linear system of ODEs.
             We use the Pseudo-inverse because the regular inverse only works for non-singular matrices.

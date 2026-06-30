@@ -140,3 +140,53 @@ def plot_simulated_intervention_ranking(s, intervention_effects, voi, top_plot=N
     plt.xlabel("Standardized effect after " + str(s.t_end) + " " + s.time_unit)
     plt.ylabel("")
     return fig
+
+
+def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol indices)", ax=None):
+    """Sobol tornado: horizontal bars of total-order index ST with first-order S1 overlaid.
+
+    Parameters
+    ----------
+    gsa_df : pandas.DataFrame
+        Output of :meth:`SDM.run_GSA` — columns ``parameter, S1, S1_conf, ST, ST_conf``.
+    kind : str
+        Only ``"tornado"`` is currently supported (kept for forward compatibility).
+    top : int, optional
+        Show only the ``top`` parameters by ST (the rest are omitted).
+    ax : matplotlib Axes, optional
+        Draw onto an existing axes; a new figure is created otherwise.
+
+    Returns the matplotlib Figure. matplotlib-only; does not set a global style.
+    """
+    if kind != "tornado":
+        raise ValueError(f"Unsupported kind {kind!r}; only 'tornado' is available.")
+
+    df = gsa_df.sort_values("ST", ascending=False)
+    if top is not None:
+        df = df.head(int(top))
+    # Plot ascending so the most influential parameter sits at the top.
+    df = df.iloc[::-1].reset_index(drop=True)
+    y = np.arange(len(df))
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, max(2.5, 0.45 * len(df) + 1.5)))
+    else:
+        fig = ax.figure
+
+    st_color = "#9ecae1"
+    s1_color = "#08519c"
+    ax.barh(y, df["ST"], height=0.6, color=st_color, edgecolor="white",
+            xerr=df["ST_conf"], error_kw=dict(ecolor="#5a6b7b", lw=1, capsize=3),
+            label="ST  (total effect, incl. interactions)", zorder=2)
+    ax.errorbar(df["S1"], y, xerr=df["S1_conf"], fmt="o", color=s1_color,
+                markersize=5, lw=1, capsize=3, label="S1  (first-order effect)", zorder=3)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(df["parameter"])
+    ax.set_xlabel("Sobol sensitivity index")
+    ax.set_title(title, loc="left", fontweight="bold")
+    ax.axvline(0, color="#888888", lw=0.8)
+    ax.legend(loc="lower right", fontsize=9, framealpha=0.95)
+    ax.margins(y=0.02)
+    fig.tight_layout()
+    return fig
