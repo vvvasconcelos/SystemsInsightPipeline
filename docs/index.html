@@ -63,6 +63,13 @@
     color: var(--accent);
   }
   .arrow { color: var(--muted); font-weight: 700; }
+  .arms { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem; margin: 1.3rem 0; }
+  .arm { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem 1.1rem; }
+  .arm-h { font-weight: 700; color: var(--accent); display: flex; align-items: center; gap: 0.5rem; }
+  .arm-n { background: var(--accent); color: #fff; border-radius: 50%; width: 1.4rem; height: 1.4rem; display: inline-flex; align-items: center; justify-content: center; font-size: 0.85rem; flex: none; }
+  .arm-flow { margin: 0.55rem 0 0.4rem; font-size: 0.9rem; color: var(--ink); }
+  .arm-flow span { background: var(--accent-soft); border-radius: 5px; padding: 0.12rem 0.4rem; white-space: nowrap; }
+  .arm p { margin: 0.3rem 0 0; font-size: 0.9rem; color: var(--muted); }
   figure { margin: 1.4rem 0; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
   figure img { width: 100%; height: auto; border-radius: 6px; }
   figcaption { font-size: 0.9rem; color: var(--muted); margin-top: 0.6rem; }
@@ -115,15 +122,45 @@
   <div class="workflow">
     <span class="step">Draw a causal loop diagram (e.g., in Kumu)</span><span class="arrow">→</span>
     <span class="step">Annotate the Excel export</span><span class="arrow">→</span>
-    <span class="step">Simulate under uncertainty</span><span class="arrow">→</span>
-    <span class="step">Rank &amp; optimize interventions</span><span class="arrow">→</span>
-    <span class="step">Find the loops that matter</span>
+    <span class="step">Simulate under uncertainty</span>
   </div>
   <p>
     Causal loop diagrams capture how experts and stakeholders believe a system works, but they are
     qualitative. SIP turns them into computational system dynamics models: every causal link gets a
-    sampled coefficient, the system is simulated many times, and the results show which
-    interventions move your outcome — and how confident you can be, given the uncertainty.
+    sampled coefficient, and the system is simulated many times. That one uncertainty ensemble then
+    feeds <strong>three complementary lines of analysis</strong>:
+  </p>
+
+  <div class="arms">
+    <div class="arm">
+      <div class="arm-h"><span class="arm-n">1</span> Decide — find leverage</div>
+      <div class="arm-flow"><span>Rank interventions</span> → <span>Optimize the budget</span></div>
+      <p>Which levers move the outcome, and the best portfolio of them under a budget.</p>
+    </div>
+    <div class="arm">
+      <div class="arm-h"><span class="arm-n">2</span> Explain — the mechanism</div>
+      <div class="arm-flow"><span>Loops That Matter</span></div>
+      <p>Which feedback loops drive the behaviour over time — and why an intervention works or stalls.</p>
+    </div>
+    <div class="arm">
+      <div class="arm-h"><span class="arm-n">3</span> Stress-test — robustness</div>
+      <div class="arm-flow"><span>Sensitivity analysis</span> → <span>Scenario discovery</span></div>
+      <p>Which uncertain assumptions your conclusions hinge on, and which combinations of conditions make them fail.</p>
+    </div>
+  </div>
+
+  <p>
+    These lines are a web, not a straight pipe — they inform one another.
+    <strong>Global sensitivity analysis</strong> ranks which uncertain assumptions matter
+    <em>globally</em>; <strong>scenario discovery</strong> then <em>localises</em> the danger — the
+    combination of conditions under which the outcome goes bad — so it naturally <em>follows</em>
+    sensitivity analysis and shares the same ensemble (the parameters it isolates should echo the
+    top sensitivity drivers, a built-in cross-check). <strong>Loops That Matter</strong> runs in
+    parallel: it explains the mechanism, and can be pointed <em>inside</em> a discovered failure
+    region to reveal which loop dominance produces it — while the loops it flags suggest which links
+    to probe with sensitivity analysis. And because the robustness track tells you <em>where
+    measurement effort pays off</em>, its findings feed back to sharpen the ranking and optimization.
+    In practice you iterate: decide, explain, stress-test, refine.
   </p>
 
   <h2>What it can do</h2>
