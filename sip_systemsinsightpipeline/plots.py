@@ -6,6 +6,28 @@ import scipy.stats
 import pandas as pd
 sns.set_theme()
 
+
+def _wrap_param_label(name, width=40):
+    """Format a sensitivity parameter name into a readable (possibly two-line) tick label.
+
+    Parameter names produced by the GSA machinery look like ``"TARGET <- SOURCE"`` (a causal
+    link) or ``"TARGET | #k"`` (a custom-equation parameter). Long names are split across two
+    lines so that *both* halves stay legible: the target on the first line and ``← source`` on
+    the second, each truncated to ``width`` characters. Plain names are returned as-is (or
+    truncated). Use a small font (see ``label_fontsize``) alongside this.
+    """
+    name = str(name)
+
+    def cut(s):
+        s = s.strip()
+        return s if len(s) <= width else s[: width - 1] + "…"
+
+    for sep, joiner in (("<-", "←"), ("|", "|")):
+        if sep in name:
+            head, tail = name.split(sep, 1)
+            return f"{cut(head)}\n{joiner} {cut(tail)}"
+    return cut(name)
+
 def plot_simulated_interventions(s, df_sol_per_sample, intervention_effects, interval_type="percentile", confidence_bounds=.95, top_plot=None):
     """
     Plot the simulated interventions over time
@@ -142,7 +164,8 @@ def plot_simulated_intervention_ranking(s, intervention_effects, voi, top_plot=N
     return fig
 
 
-def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol indices)", ax=None):
+def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol indices)", ax=None,
+             wrap=True, label_width=40, label_fontsize=8):
     """Sobol tornado: horizontal bars of total-order index ST with first-order S1 overlaid.
 
     Parameters
@@ -156,6 +179,10 @@ def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol 
         Show only the ``top`` parameters by ST (the rest are omitted).
     ax : matplotlib Axes, optional
         Draw onto an existing axes; a new figure is created otherwise.
+    wrap : bool
+        Split long ``"TARGET <- SOURCE"`` parameter names across two lines so both halves stay
+        legible (see :func:`_wrap_param_label`); ``label_width`` truncates each half and
+        ``label_fontsize`` sets the tick font size.
 
     Returns the matplotlib Figure. matplotlib-only; does not set a global style.
     """
@@ -169,8 +196,10 @@ def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol 
     df = df.iloc[::-1].reset_index(drop=True)
     y = np.arange(len(df))
 
+    labels = [_wrap_param_label(p, label_width) if wrap else str(p) for p in df["parameter"]]
+    row_h = 0.62 if wrap else 0.45   # two-line labels need more vertical room
     if ax is None:
-        fig, ax = plt.subplots(figsize=(8, max(2.5, 0.45 * len(df) + 1.5)))
+        fig, ax = plt.subplots(figsize=(9, max(2.5, row_h * len(df) + 1.6)))
     else:
         fig = ax.figure
 
@@ -195,7 +224,7 @@ def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol 
                 label="S1  (first-order effect)", zorder=3)
 
     ax.set_yticks(y)
-    ax.set_yticklabels(df["parameter"])
+    ax.set_yticklabels(labels, fontsize=label_fontsize)
     ax.set_xlabel("Sobol sensitivity index")
     ax.set_title(title, loc="left", fontweight="bold")
     ax.set_xlim(left=min(0, ax.get_xlim()[0]))
@@ -206,7 +235,8 @@ def plot_gsa(gsa_df, kind="tornado", top=None, title="Global sensitivity (Sobol 
     return fig
 
 
-def plot_moment_independent(df, measure="delta", top=None, title=None, ax=None):
+def plot_moment_independent(df, measure="delta", top=None, title=None, ax=None,
+                            wrap=True, label_width=40, label_fontsize=8):
     """Horizontal bar chart of a moment-independent sensitivity measure.
 
     Parameters
@@ -218,6 +248,8 @@ def plot_moment_independent(df, measure="delta", top=None, title=None, ax=None):
         Which column to plot.
     top : int, optional
         Show only the ``top`` parameters by the measure.
+    wrap : bool
+        Split long ``"TARGET <- SOURCE"`` names across two lines (see ``plot_gsa``).
 
     Returns the matplotlib Figure. matplotlib-only; does not set a global style.
     """
@@ -238,8 +270,10 @@ def plot_moment_independent(df, measure="delta", top=None, title=None, ax=None):
     d = d.iloc[::-1].reset_index(drop=True)
     y = np.arange(len(d))
 
+    labels = [_wrap_param_label(p, label_width) if wrap else str(p) for p in d["parameter"]]
+    row_h = 0.62 if wrap else 0.45
     if ax is None:
-        fig, ax = plt.subplots(figsize=(8, max(2.5, 0.45 * len(d) + 1.5)))
+        fig, ax = plt.subplots(figsize=(9, max(2.5, row_h * len(d) + 1.6)))
     else:
         fig = ax.figure
 
@@ -247,7 +281,7 @@ def plot_moment_independent(df, measure="delta", top=None, title=None, ax=None):
     ax.barh(y, d[value_col], height=0.6, color="#74a9cf", edgecolor="white",
             xerr=xerr, error_kw=dict(ecolor="#5a6b7b", lw=1, capsize=3), zorder=2)
     ax.set_yticks(y)
-    ax.set_yticklabels(d["parameter"])
+    ax.set_yticklabels(labels, fontsize=label_fontsize)
     ax.set_xlabel(label)
     ax.set_title(title or default_title, loc="left", fontweight="bold")
     ax.set_xlim(left=0)

@@ -28,9 +28,12 @@ interface — but custom equations are supported when you need them.
   allocations, and scales to dozens of interventions. Maximize or minimize the outcome.
 - **Loops That Matter.** Scores every feedback loop's contribution to model behavior over time
   (Schoenberg–Davidsen–Eberlein method; [`LoopsThatMatter`](sip_systemsinsightpipeline/ltm.py)).
-- **Global sensitivity analysis.** Variance-based Sobol indices (first-order `S1` and total-order
-  `ST` with confidence intervals) ranking which uncertain parameters drive the outcome — including
-  interactions, unlike one-factor-at-a-time (`SDM.run_GSA`, `plots.plot_gsa`).
+- **Global sensitivity analysis.** Which uncertain parameters drive the outcome, via
+  `SDM.run_GSA(method=...)`: variance-based **Sobol** indices (`S1`/`ST` with BCa bootstrap
+  confidence intervals projected onto `[0,1]`), and moment-independent **Borgonovo δ** / **PAWN**
+  measures that capture shifts in the whole output distribution and are non-negative by
+  construction. See [docs/sensitivity-methods.html](docs/sensitivity-methods.html) for choosing
+  between them.
 - **Scenario discovery.** PRIM (vendored) and CART localise the combinations of conditions that
   produce an outcome of concern as interpretable boxes/rules with density and coverage
   (`discover_scenarios`, `SDM.sample_outcomes`).

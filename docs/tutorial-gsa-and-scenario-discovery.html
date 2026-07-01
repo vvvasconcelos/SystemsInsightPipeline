@@ -142,12 +142,13 @@ fig = plot_gsa(gsa_df, top=12)</code></pre>
   effect. SIP therefore <strong>projects the estimate and its confidence interval onto
   <code>[0, 1]</code></strong> (the <code>clip=True</code> default of <code>run_GSA</code>): such a
   parameter reports <code>S1 = 0</code> with a one-sided interval like <code>[0, 0.05]</code> —
-  read as "indistinguishable from zero." The whiskers are an <strong>asymmetric percentile
-  bootstrap</strong> interval, not a symmetric <code>±</code> band, because the sampling
-  distribution of an index is skewed near the 0/1 boundaries. Pass <code>clip=False</code> to see
-  the raw, unconstrained estimates — a useful convergence check, since large negative excursions
-  are a direct signal that <code>n</code> is too small. As an identity, <code>S1 ≤ ST ≤ 1</code> and
-  <code>ΣS1 ≤ 1</code> hold in expectation.
+  read as "indistinguishable from zero." The whiskers are an <strong>asymmetric BCa</strong>
+  (bias-corrected and accelerated) bootstrap interval, not a symmetric <code>±</code> band, because
+  the sampling distribution of an index is skewed near the 0/1 boundaries (use
+  <code>ci="percentile"</code> for the plain bootstrap, or <code>clip=False</code> for the raw,
+  unconstrained estimates — a useful convergence check). Why a Sobol estimator can go negative at
+  all, and the trade-offs of the alternatives, are covered in
+  <a href="sensitivity-methods.html">Choosing a sensitivity method</a>.
 </div>
 
 <div class="callout">
@@ -156,6 +157,56 @@ fig = plot_gsa(gsa_df, top=12)</code></pre>
   pull?"; GSA answers "which uncertain assumption should I pin down?". A link can be a strong driver
   of variance (high ST) without being something you can act on — that is a measurement priority,
   not an intervention.
+</div>
+
+<h3 id="distributional">1.1 Beyond variance: distributional (moment-independent) importance</h3>
+
+<p>Variance is only one feature of the output distribution. A parameter can leave the variance
+almost unchanged yet reshape the <em>tails</em> or <em>skew</em> of the outcome — an effect a
+variance decomposition understates. <strong>Moment-independent</strong> measures look at the shift in
+the <em>whole distribution</em> instead. SIP offers two, both selected through the same
+<code>run_GSA</code> call and both <strong>non-negative by construction</strong> (so they never show
+the spurious negativity of a Sobol estimate). They also run on a plain Monte-Carlo ensemble — <code>n</code>
+runs, not <code>n·(d+2)</code> — so they are cheaper, and reuse the same draws as scenario discovery.</p>
+
+<pre><code># Borgonovo's delta: expected shift in the output *density* when a parameter is fixed
+delta_df = sdm.run_GSA(voi, method="delta", n=3000, seed=2)
+from sip_systemsinsightpipeline.plots import plot_moment_independent
+plot_moment_independent(delta_df, measure="delta", top=12)
+
+# PAWN: a CDF-based alternative
+pawn_df = sdm.run_GSA(voi, method="pawn", n=3000, seed=2)</code></pre>
+
+<figure>
+  <img src="img/gsa_delta_tornado.png" alt="Bar chart of Borgonovo delta importance for the top link strengths">
+  <figcaption>Borgonovo δ for the most influential link strengths — the expected normalised shift in
+  the peak-hour-use distribution when each link is fixed.</figcaption>
+</figure>
+
+<p>Plotting the variance-based <code>ST</code> against δ for every parameter shows where the two
+agree and where they differ:</p>
+
+<figure>
+  <img src="img/gsa_sobol_vs_delta.png" alt="Scatter of Sobol total-order ST versus Borgonovo delta per parameter">
+  <figcaption>Each point is one parameter. The two dominant drivers sit far out and <strong>both
+  methods agree</strong> they matter most. The dense cluster near <code>ST = 0</code> with
+  <code>δ ≈ 0.05–0.09</code> is δ's <em>positive floor near zero</em> — the flip side of being
+  non-negative: irrelevant inputs read as a small positive δ rather than exactly zero.</figcaption>
+</figure>
+
+<div class="callout read">
+  <span class="t">How to read it — and when to prefer δ</span>
+  The <strong>headline drivers agree across methods</strong>, which is reassuring; the two measures
+  diverge mainly on the <em>weak</em> parameters, where each has its own near-zero behaviour —
+  Sobol can dip (spuriously) negative and is projected to 0, while δ sits at a small positive floor.
+  Neither is strictly "better" there. Where δ genuinely earns its keep is <strong>effects that
+  first-order variance misses</strong>: on the controlled Ishigami function the input
+  <code>x₃</code> has Sobol <code>S1 ≈ 0</code> yet <code>δ ≈ 0.16</code>, because its entire
+  influence is through an interaction. Reach for the moment-independent measures when you care about
+  <em>tail / shape</em> effects, suspect interaction-driven inputs, or simply want a non-negative
+  importance that needs no boundary handling — and lean on Sobol's <code>S1</code> vs <code>ST</code>
+  split to read "acts alone vs through interactions." The trade-offs are laid out in
+  <a href="sensitivity-methods.html">Choosing a sensitivity method</a>.
 </div>
 
 <h2><span class="n">2</span>Scenario discovery (PRIM)</h2>
