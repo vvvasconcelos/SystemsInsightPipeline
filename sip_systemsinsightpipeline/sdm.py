@@ -442,30 +442,33 @@ class SDM:
         """ Evaluate the auxiliary variables at each time step.
         Input: original parameter dictionary with auxiliary terms, and the solution dataframe
         Output: dataframe with added auxiliary values at each time step
-        
-        Uses _compute_auxiliary_value as single source of truth for auxiliary computation.
-        """
-        if self.auxiliaries_sorted == []: # If not already sorted
-            self.auxiliaries_sorted = self.sort_auxiliaries(params)
-    
-        df_sol_with_auxiliaries = df_sol.copy()
-        
-        # Initialize auxiliary columns
-        for aux in self.auxiliaries_sorted:
-            df_sol_with_auxiliaries[aux] = np.nan
-        
-        # Compute auxiliaries at each time step
-        for t in self.t_eval:
-            # Build vals dict from current row
-            vals = {col: df_sol_with_auxiliaries.loc[t, col] 
-                    for col in df_sol_with_auxiliaries.columns 
-                    if col != 'Time' and col not in self.auxiliaries}
-            
-            # Compute each auxiliary in dependency order
-            for aux in self.auxiliaries_sorted:
-                vals[aux] = self._compute_equation_value(aux, params, vals)
-                df_sol_with_auxiliaries.loc[t, aux] = vals[aux]
 
+        Uses _compute_equation_value as single source of truth for auxiliary computation.
+        """
+        # No auxiliaries: nothing to add. (This early exit matters: the per-row pandas
+        # access below used to cost ~a third of total simulation time on aux-free models.)
+        if not self.auxiliaries:
+            return df_sol
+
+        if self.auxiliaries_sorted == []:  # If not already sorted
+            self.auxiliaries_sorted = self.sort_auxiliaries(params)
+
+        # Work on plain numpy arrays; per-cell .loc writes are pathologically slow.
+        base_cols = [c for c in df_sol.columns if c != 'Time' and c not in self.auxiliaries]
+        base = {c: df_sol[c].to_numpy() for c in base_cols}
+        n_t = len(df_sol.index)
+        aux_arrays = {aux: np.empty(n_t, dtype=np.float64) for aux in self.auxiliaries_sorted}
+
+        for k in range(n_t):
+            vals = {c: base[c][k] for c in base_cols}
+            for aux in self.auxiliaries_sorted:
+                v = self._compute_equation_value(aux, params, vals)
+                vals[aux] = v
+                aux_arrays[aux][k] = v
+
+        df_sol_with_auxiliaries = df_sol.copy()
+        for aux in self.auxiliaries_sorted:
+            df_sol_with_auxiliaries[aux] = aux_arrays[aux]
         return df_sol_with_auxiliaries
 
     def get_intervention_effects(self):
