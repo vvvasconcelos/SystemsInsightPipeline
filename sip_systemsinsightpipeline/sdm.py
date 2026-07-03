@@ -9,6 +9,7 @@ from tabulate import tabulate
 
 class SDM:
     def __init__(self, s):
+        self.s = s  # keep a reference to the settings (used by plotting helpers)
         self.df_adj = s.df_adj
         self.df_adj_incl_interactions = s.df_adj_incl_interactions
         self.N = s.N

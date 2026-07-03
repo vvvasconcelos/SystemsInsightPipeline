@@ -185,6 +185,17 @@ class Extract:
             self.has_equations = True
         else:
             self.has_equations = False
+        # Tolerate missing annotation columns: create them empty with a clear warning,
+        # instead of crashing with a raw KeyError further down.
+        if "Label" not in df_e.columns:
+            raise Exception("The Elements sheet must have a 'Label' column with the variable names.")
+        for col, hint in (("Type", "variables will default to stock/constant based on incoming links"),
+                          ("Tags", "no variable will be marked as an intervention"),
+                          ("Description", "no variable will be marked as the variable of interest (VOI)")):
+            if col not in df_e.columns:
+                warnings.warn(f"The Elements sheet has no '{col}' column; {hint}.")
+                df_e = df_e.copy()
+                df_e[col] = np.nan
         df_e = df_e[[col for col in base_columns if col in df_e.columns]]
         df_c = df_c[["From", "Type", "To"]]
         
@@ -213,8 +224,24 @@ class Extract:
                     self.var_to_type[self.original_to_cleaned_var[var]] = 'constant'
                 print("")
 
-        self.intervention_variables = [self.original_to_cleaned_var[var] for var in list(df_e.loc[df_e["Tags"] != 0, "Label"])]
-        self.intervention_strengths = dict(zip(self.variables, list(df_e.loc[:, "Tags"])))
+        # Intervention strengths come from the Tags column. Coerce to numeric so that
+        # blank cells (NaN) and leftover Kumu tag *text* are treated as "not an
+        # intervention" (strength 0) instead of silently producing NaN dynamics or a
+        # cryptic numpy crash downstream.
+        tags_raw = df_e["Tags"]
+        tags = pd.to_numeric(tags_raw, errors="coerce")
+        non_numeric = tags.isna() & tags_raw.notna() & (tags_raw.astype(str).str.strip() != "")
+        if non_numeric.any():
+            bad = ", ".join(f"{lbl!r} (Tags={val!r})"
+                            for lbl, val in zip(df_e.loc[non_numeric, "Label"], tags_raw[non_numeric]))
+            warnings.warn(
+                f"Non-numeric Tags treated as 0 (not an intervention): {bad}. "
+                "Use a numeric intervention strength (e.g. 1 or -1) to mark interventions."
+            )
+        tags = tags.fillna(0.0)
+
+        self.intervention_variables = [self.original_to_cleaned_var[var] for var in list(df_e.loc[tags != 0, "Label"])]
+        self.intervention_strengths = dict(zip(self.variables, [float(t) for t in tags]))
         self.variable_of_interest = list(df_e.loc[df_e["Description"] == "VOI", "Label"])
 
         if len(self.variable_of_interest) == 1:

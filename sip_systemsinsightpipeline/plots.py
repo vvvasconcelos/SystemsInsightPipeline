@@ -28,90 +28,119 @@ def _wrap_param_label(name, width=40):
             return f"{cut(head)}\n{joiner} {cut(tail)}"
     return cut(name)
 
-def plot_simulated_interventions(s, df_sol_per_sample, intervention_effects, interval_type="percentile", confidence_bounds=.95, top_plot=None):
+def plot_trajectories(sdm, variables=None, interventions=None, kind="band",
+                      percentiles=(10, 90), max_spaghetti=40, ncols=2, figsize=None,
+                      label_fontsize=9):
+    """Plot simulated trajectories of model variables over time.
+
+    Requires :meth:`SDM.run_simulations` to have been called. Produces one panel per
+    variable; within each panel, one colour per selected intervention run.
+
+    The *shape* of these curves is often the most informative output of a system dynamics
+    model: exponential growth (a dominant reinforcing loop), goal-seeking (balancing loop),
+    S-shaped growth (reinforcing then balancing), overshoot-and-collapse, or oscillation
+    (balancing loop with delay). See docs/trajectories-and-archetypes.html for a guide.
+
+    Parameters
+    ----------
+    sdm : SDM
+        A simulated model (``sdm.run_simulations()`` already called).
+    variables : str or list of str, optional
+        Which variables to plot (stocks, auxiliaries or constants). Defaults to the
+        variable(s) of interest.
+    interventions : str or list of str, optional
+        Which intervention runs to show. Defaults to the first intervention variable;
+        pass a list to compare several, or ``"all"`` for every intervention (capped at 6
+        with a warning, to keep the plot readable).
+    kind : {"band", "spaghetti"}
+        ``"band"``: median across the N parameter samples with a percentile band
+        (default 10th-90th). ``"spaghetti"``: individual sample trajectories (up to
+        ``max_spaghetti`` per intervention), which better reveals qualitatively different
+        behaviours hidden by the median.
+    percentiles : (low, high)
+        Band percentiles for ``kind="band"``.
+
+    Returns the matplotlib Figure. matplotlib-only; does not set a global style.
+
+    Notes
+    -----
+    By default the solver only *records* the first and last time point. For smooth curves,
+    set ``sdm.t_eval = np.linspace(0, s.t_end, 50)`` **before** calling ``run_simulations``.
     """
-    Plot the simulated interventions over time
-    """
-    if top_plot != None:
-        top_plot = min(top_plot or len(intervention_effects), len(intervention_effects))
-    
-    df_sol_per_sample_reordered = df_sol_per_sample.copy()
-    top_vars_plot = list(intervention_effects.keys())[:top_plot]
+    import textwrap
+    import warnings as _warnings
 
-    for i in range(s.N):
-        df_sol_per_sample_dict_i = dict(zip(s.intervention_variables, df_sol_per_sample[i]))
-        df_sol_per_sample_reordered[i] = [df_sol_per_sample_dict_i[var] for var in top_vars_plot] 
+    if getattr(sdm, "df_sol_per_sample", None) is None:
+        raise ValueError("Call sdm.run_simulations() before plotting trajectories.")
+    t = np.asarray(sdm.t_eval, dtype=float)
+    if t.size < 3:
+        _warnings.warn(
+            "Only {} recorded time points - trajectories will be straight lines. Set "
+            "sdm.t_eval = np.linspace(0, t_end, 50) before run_simulations() for smooth curves.".format(t.size))
 
-    df_SA = pd.DataFrame(intervention_effects)
-    df_SA = df_SA.reindex(columns=list(
-                            df_SA.abs().median().sort_values(ascending=False).index))
-    palette_dict = {var : "#4682B4" for var in df_SA.columns}  # Blue for positive effects
-    medians = df_SA.median()
-    lower_than_zero_vars = medians.loc[medians < 0].index
-    for var in lower_than_zero_vars:
-        palette_dict[var] = "#FF6347"  # Red for negative effects
+    voi = sdm.variable_of_interest
+    if variables is None:
+        variables = list(voi) if isinstance(voi, (list, tuple)) else [voi]
+    elif isinstance(variables, str):
+        variables = [variables]
 
-    num_plots = len(top_vars_plot)
-    num_rows = int(np.ceil(num_plots / 3))
+    all_ints = list(sdm.intervention_variables)
+    if interventions is None:
+        interventions = [all_ints[0]]
+    elif interventions == "all":
+        interventions = all_ints
+        if len(interventions) > 6:
+            _warnings.warn(f"{len(interventions)} interventions; showing the first 6. "
+                           "Pass an explicit list to choose which.")
+            interventions = interventions[:6]
+    elif isinstance(interventions, str):
+        interventions = [interventions]
+    for iv in interventions:
+        if iv not in all_ints:
+            raise ValueError(f"'{iv}' is not an intervention variable.")
 
-    fig, axs = plt.subplots(num_rows, 3, figsize=(12, 4 * num_rows))
-    fig.suptitle("Simulated interventions with N="+ str(s.N) + " samples")
-    ax = axs.flatten()
+    n_panels = len(variables)
+    ncols = min(ncols, n_panels)
+    nrows = int(np.ceil(n_panels / ncols))
+    if figsize is None:
+        figsize = (5.6 * ncols, 3.8 * nrows)
+    fig, axs = plt.subplots(nrows, ncols, figsize=figsize, squeeze=False)
+    axes = axs.flatten()
 
-    for k, var in enumerate(top_vars_plot):
-        if k >= len(ax):
-            break  # Prevent index out of bounds
-        if interval_type != "spaghetti":
-            avg_at_time_t = []
-            lb_confs_at_time_t = []
-            ub_confs_at_time_t = []
+    colors = plt.get_cmap("tab10")
+    N = len(sdm.df_sol_per_sample)
 
-            for t in s.t_eval:
-                samples_at_time_t = [df_sol_per_sample[n][k].loc[t, s.variable_of_interest] for n in range(s.N)]
-
-                if interval_type == "confidence":
-                    label_avg = "Mean"
-                    mean = np.mean(samples_at_time_t)
-                    standard_error = scipy.stats.sem(samples_at_time_t)
-                    h = standard_error * scipy.stats.t.ppf((1 + confidence_bounds) / 2., s.N-1)
-                    avg_at_time_t.append(mean)
-                    lb_confs_at_time_t.append(mean-h)
-                    ub_confs_at_time_t.append(mean+h)
-
-                elif interval_type == "percentile":
-                    label_avg = "Median"
-                    avg_at_time_t.append(np.median(samples_at_time_t))
-                    lower_percentile = (1 - confidence_bounds) / 2 * 100
-                    upper_percentile = (1 + confidence_bounds) / 2 * 100
-                    lb_confs_at_time_t.append(np.percentile(samples_at_time_t, lower_percentile))
-                    ub_confs_at_time_t.append(np.percentile(samples_at_time_t, upper_percentile))
-    
-            ax[k].plot(s.t_eval, avg_at_time_t, label=label_avg, color=palette_dict[var])
-            ax[k].fill_between(s.t_eval, lb_confs_at_time_t, ub_confs_at_time_t,
-                                alpha=.3, label=str(int(confidence_bounds*100)) + "% " + interval_type + " interval", color=palette_dict[var])
-        
-        else:
-            for i, data_i, in enumerate(df_sol_per_sample):
-                ax[k].plot(data_i[0].Time, data_i[k][s.variable_of_interest], alpha=.3, color=palette_dict[var])
-
-        label = " ".join(s.variable_of_interest.split("_"))
-        ax[k].set_ylabel(label)
-        title = " ".join(var.split("_")) #"Intervention on " + " ".join(var.split("_"))
-        ax[k].set_title(title)
-        #ax[k].set_ylim([min_value, max_value])
-
-        if k >= num_plots - 3:  # Last row of plots
-            ax[k].set_xlabel(s.time_unit)
-
-        if k == 0:
-            ax[k].legend()
-
-    # Hide unused subplots
-    for b in range(num_plots, len(ax)):
-        ax[b].axis('off')
-
-    plt.tight_layout()
-
+    for p, var in enumerate(variables):
+        ax = axes[p]
+        for ci, iv in enumerate(interventions):
+            i = all_ints.index(iv)
+            series = np.array([sdm.df_sol_per_sample[n][i][var].values for n in range(N)], dtype=float)
+            short_iv = iv if len(iv) <= 32 else iv[:29] + "..."
+            if kind == "band":
+                med = np.median(series, axis=0)
+                lb = np.percentile(series, percentiles[0], axis=0)
+                ub = np.percentile(series, percentiles[1], axis=0)
+                ax.plot(t, med, color=colors(ci), lw=2.0, label=short_iv, zorder=3)
+                ax.fill_between(t, lb, ub, color=colors(ci), alpha=0.15, lw=0, zorder=2)
+            elif kind == "spaghetti":
+                shown = min(N, max_spaghetti)
+                for n in range(shown):
+                    ax.plot(t, series[n], color=colors(ci), alpha=max(0.08, 1.5 / shown),
+                            lw=0.9, zorder=2)
+                ax.plot([], [], color=colors(ci), label=short_iv)  # legend proxy
+            else:
+                raise ValueError(f"kind must be 'band' or 'spaghetti', got {kind!r}.")
+        ax.axhline(0, color="#888888", lw=0.7, ls=":", zorder=1)
+        ax.set_title("\n".join(textwrap.wrap(var, 46)), fontsize=label_fontsize + 1)
+        time_unit = getattr(getattr(sdm, "s", None), "time_unit", None) or "time"
+        ax.set_xlabel(f"Time ({time_unit})", fontsize=label_fontsize)
+        ax.tick_params(labelsize=label_fontsize)
+        if len(interventions) > 1 and p == 0:
+            ax.legend(fontsize=max(7, label_fontsize - 1), title="Intervention on",
+                      title_fontsize=max(7, label_fontsize - 1))
+    for q in range(n_panels, len(axes)):
+        axes[q].axis("off")
+    fig.tight_layout()
     return fig
 
 def plot_simulated_intervention_ranking(s, intervention_effects, voi, top_plot=None, order=None):
@@ -159,7 +188,9 @@ def plot_simulated_intervention_ranking(s, intervention_effects, voi, top_plot=N
     sns.boxplot(data=df_SA, showfliers=False, whis=True, orient='h', palette=palette)
     plt.vlines(x=0, ymin=-0.5, ymax=len(df_SA.columns) - 0.6, colors='black', linestyles='dashed')
     plt.title("Effect on " + " ".join(voi.split("_")))
-    plt.xlabel("Standardized effect after " + str(s.t_end) + " " + s.time_unit)
+    # Effects are the raw change in the outcome at the final time point (model units),
+    # not standardized scores.
+    plt.xlabel("Effect after " + str(s.t_end) + " " + s.time_unit + " (final-time value, model units)")
     plt.ylabel("")
     return fig
 

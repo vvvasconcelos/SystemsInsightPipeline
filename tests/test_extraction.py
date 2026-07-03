@@ -58,6 +58,72 @@ def test_extraction_matrices(tmp_path):
     assert sorted(extract.intervention_variables) == ["B", "C"]
 
 
+def _write_simple(path, df_e, df_c=None):
+    if df_c is None:
+        df_c = pd.DataFrame({"From": ["Lever"], "Type": ["+"], "To": ["S"]})
+    with pd.ExcelWriter(path) as w:
+        df_e.to_excel(w, sheet_name="Elements", index=False)
+        df_c.to_excel(w, sheet_name="Connections", index=False)
+
+
+def test_blank_tags_is_not_an_intervention(tmp_path):
+    """Regression: a blank (NaN) Tags cell used to make the variable an intervention with
+    NaN strength, silently corrupting every trajectory to NaN."""
+    df_e = pd.DataFrame({
+        "Label": ["S", "Lever", "Context"],
+        "Type": ["stock", "constant", "constant"],
+        "Tags": [0, 1, None],                       # Context left blank
+        "Description": ["VOI", "", ""],
+    })
+    df_c = pd.DataFrame({"From": ["Lever", "Context"], "Type": ["+", "+"], "To": ["S", "S"]})
+    _write_simple(tmp_path / "m.xlsx", df_e, df_c)
+    s = Extract(str(tmp_path / "m.xlsx")).extract_settings()
+    assert s.intervention_variables == ["Lever"]
+    assert s.intervention_strengths["Context"] == 0.0
+    assert all(np.isfinite(v) for v in s.intervention_strengths.values())
+
+
+def test_text_tags_warns_and_is_not_an_intervention(tmp_path):
+    """Regression: leftover Kumu tag text used to become a string 'strength' and crash
+    numpy far downstream; now it is coerced to 0 with a clear warning."""
+    df_e = pd.DataFrame({
+        "Label": ["S", "Lever", "Context"],
+        "Type": ["stock", "constant", "constant"],
+        "Tags": [0, 1, "policy lever"],
+        "Description": ["VOI", "", ""],
+    })
+    df_c = pd.DataFrame({"From": ["Lever", "Context"], "Type": ["+", "+"], "To": ["S", "S"]})
+    _write_simple(tmp_path / "m.xlsx", df_e, df_c)
+    with pytest.warns(UserWarning, match="Non-numeric Tags"):
+        s = Extract(str(tmp_path / "m.xlsx")).extract_settings()
+    assert s.intervention_variables == ["Lever"]
+    assert s.intervention_strengths["Context"] == 0.0
+
+
+def test_missing_description_column_warns_not_crashes(tmp_path):
+    df_e = pd.DataFrame({
+        "Label": ["S", "Lever"],
+        "Type": ["stock", "constant"],
+        "Tags": [0, 1],
+    })
+    _write_simple(tmp_path / "m.xlsx", df_e)
+    with pytest.warns(UserWarning, match="Description"):
+        s = Extract(str(tmp_path / "m.xlsx")).extract_settings()
+    assert s.variable_of_interest == []
+
+
+def test_missing_tags_column_gives_clear_error(tmp_path):
+    df_e = pd.DataFrame({
+        "Label": ["S", "Lever"],
+        "Type": ["stock", "constant"],
+        "Description": ["VOI", ""],
+    })
+    _write_simple(tmp_path / "m.xlsx", df_e)
+    with pytest.warns(UserWarning, match="Tags"):
+        with pytest.raises(Exception, match="at least one intervention"):
+            Extract(str(tmp_path / "m.xlsx")).extract_settings()
+
+
 @pytest.mark.parametrize("types", [
     ["stock", "auxiliary", "constant"],
     ["Stock", "Auxiliary", "Constant"],
