@@ -16,7 +16,10 @@ interface — but custom equations are supported when you need them.
   ([`Extract`](sip_systemsinsightpipeline/cld.py), [`SDM`](sip_systemsinsightpipeline/sdm.py)).
 - **Simulation under uncertainty.** Link coefficients are unknown in qualitative diagrams, so SIP
   samples them and simulates every tagged intervention across `N` parameter draws
-  (`SDM.run_simulations`).
+  (`SDM.run_simulations`), with trajectory plots for any variable — median/percentile bands or
+  spaghetti (`plots.plot_trajectories`; see
+  [docs/trajectories-and-archetypes.html](docs/trajectories-and-archetypes.html) for the classic
+  trajectory shapes and the loop structures behind them).
 - **Intervention ranking.** Distributions of each intervention's effect on your variable of
   interest, with box plots, pairwise comparison tables (bootstrapped CIs, Cliff's delta), and
   Spearman sensitivity analysis of which links drive the outcome (`get_intervention_effects`,

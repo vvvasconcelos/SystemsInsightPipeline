@@ -1,8 +1,17 @@
 # Feature request — Global Sensitivity Analysis (`run_GSA`) and Scenario Discovery
 
-**Status:** proposed · **Scope:** two new, independent analysis capabilities on top of the existing
-`SDM` model-analysis workflow · **Audience:** SIP developers (self-contained — no external project context
-needed).
+**Status:** ✅ **IMPLEMENTED in v0.4.0** (2026‑06). `SDM.run_GSA` ships `method="sobol"|"delta"|"pawn"`
+(engine in `gsa.py`, SALib‑backed, BCa CIs); `discover_scenarios` ships PRIM (vendored) + CART
+(scikit‑learn) with `ScenarioResult`/`Box` (density/coverage/mass + peeling trajectory); `SDM.sample_outcomes`
+produces the `(X, y)` ensemble. Deps `SALib>=1.4` + `scikit-learn>=1.0` added. Validated by
+`tests/test_gsa.py` (Ishigami) + `tests/test_scenario_discovery.py` (known synthetic box). Used by the W6
+SIP practicals (`2026-27/practicals/w6_leverage/`). *Original request below, kept for the record.*
+
+---
+
+**Status (original):** proposed · **Scope:** two new, independent analysis capabilities on top of the
+existing `SDM` model-analysis workflow · **Audience:** SIP developers (self-contained — no external project
+context needed).
 
 ## 1. Summary
 

@@ -303,9 +303,14 @@ plot_simulated_intervention_ranking(s, effects[voi], voi)</code></pre>
   model honestly reporting its structure: <strong>there are no stocks, so nothing accumulates and
   nothing unfolds over time</strong> — exactly what the step-4 classification predicted. The moment
   a diagram contains stocks and feedback loops, these curves bend, overshoot, and saturate —
-  compare the <a href="tutorial-insulation.html#timecourse">same plot in the insulation twin</a>.
-  If your time-course plots look flat and you expected dynamics, revisit step 4: something that
-  should be a stock is probably labeled auxiliary.
+  compare the <a href="tutorial-insulation.html#timecourse">same plot in the insulation twin</a>,
+  and see <a href="trajectories-and-archetypes.html">Reading trajectories: the classic shapes</a>
+  for the six trajectory archetypes (exponential growth, goal-seeking, S-shaped growth, overshoot
+  &amp; collapse, oscillation) and the loop structure behind each. Use
+  <code>plots.plot_trajectories(sdm)</code> to draw these curves for any variable — set
+  <code>sdm.t_eval = np.linspace(0, s.t_end, 50)</code> before <code>run_simulations()</code> for
+  smooth lines. If your time-course plots look flat and you expected dynamics, revisit step 4:
+  something that should be a stock is probably labeled auxiliary.
 </div>
 
 <h3>7.3 — Sensitivity analysis: which assumptions matter?</h3>
@@ -417,6 +422,27 @@ twin</a>, where 21 real loops compete for dominance.</p>
   <tr><td>8</td><td>Optimize the budget; read the allocation scatter</td><td>Python</td></tr>
   <tr><td>9</td><td>Check which feedback loops drive the behavior</td><td>Python</td></tr>
 </table>
+
+<h2><span class="n">11</span>Further reading</h2>
+
+<p>Pointers for different starting points:</p>
+<ul>
+  <li><strong>New to systems thinking?</strong> Start with Wikipedia's
+  <a href="https://en.wikipedia.org/wiki/Causal_loop_diagram">causal loop diagram</a> and
+  <a href="https://en.wikipedia.org/wiki/Stock_and_flow">stock and flow</a> pages, then
+  Meadows, D. H. (2008), <em>Thinking in Systems: A Primer</em> — the gentlest full introduction.</li>
+  <li><strong>Want the modelling depth?</strong> Sterman, J. D. (2000),
+  <em>Business Dynamics: Systems Thinking and Modeling for a Complex World</em> — the standard
+  reference; and our guide to
+  <a href="trajectories-and-archetypes.html">reading trajectories and the classic archetypes</a>.</li>
+  <li><strong>Wondering about the "simulate many times" idea?</strong>
+  <a href="https://en.wikipedia.org/wiki/Monte_Carlo_method">Monte Carlo methods</a> — sampling
+  unknown parameters and looking at the distribution of outcomes.</li>
+  <li><strong>The method behind SIP:</strong> Uleman, J.F. et&nbsp;al.,
+  <em>Diagrams-to-Dynamics (D2D): Exploring Causal Loop Diagram Leverage Points under
+  Uncertainty</em>, BMC Medicine (in press),
+  <a href="https://arxiv.org/abs/2508.05659">arXiv:2508.05659</a>.</li>
+</ul>
 
 <div class="next">
   <a href="tutorial-insulation.html"><strong>Same tutorial, real-world model →</strong>

@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reading trajectories: the classic shapes · Systems Insight Pipeline</title>
+<meta name="description" content="How to read simulated trajectories from a system dynamics model: exponential growth, goal-seeking, S-shaped growth, overshoot and collapse, and oscillation — the loop structures behind each shape, with SIP code and references.">
+<style>
+  :root {
+    --ink: #1c2733; --muted: #5a6b7b; --accent: #21618c; --accent-soft: #eaf2f8;
+    --card: #ffffff; --bg: #f5f7fa; --border: #dde4ec; --good: #1e8449; --warn: #b9770e;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: "Segoe UI", system-ui, -apple-system, sans-serif; color: var(--ink); background: var(--bg); line-height: 1.65; }
+  header { background: linear-gradient(135deg, #1a5276, #21618c 60%, #2980b9); color: #fff; padding: 2rem 1.5rem; }
+  header .crumb { font-size: 0.9rem; }
+  header .crumb a { color: #cfe3f3; text-decoration: none; }
+  header h1 { margin: 0.4rem 0 0.2rem; font-size: 1.9rem; }
+  header p { margin: 0.2rem 0 0; color: #d6e6f2; max-width: 52rem; }
+  main { max-width: 56rem; margin: 0 auto; padding: 2rem 1.5rem 1rem; }
+  h2 { color: var(--accent); margin-top: 2.6rem; }
+  table { border-collapse: collapse; width: 100%; margin: 1rem 0; background: var(--card); font-size: 0.9rem; }
+  th, td { border: 1px solid var(--border); padding: 0.5rem 0.7rem; text-align: left; vertical-align: top; }
+  th { background: var(--accent-soft); color: var(--accent); }
+  code { font-family: Consolas, "Courier New", monospace; background: var(--accent-soft); padding: 0.05rem 0.3rem; border-radius: 4px; font-size: 0.9em; }
+  pre { background: #102a3c; color: #e8f1f8; border-radius: 10px; padding: 1.1rem 1.3rem; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  pre code { background: none; padding: 0; color: inherit; }
+  .callout { border-left: 4px solid var(--accent); background: var(--card); border-radius: 0 10px 10px 0; padding: 0.9rem 1.2rem; margin: 1.2rem 0; }
+  .callout.read { border-color: var(--good); }
+  .callout.read .t { color: var(--good); }
+  .callout .t { display: block; margin-bottom: 0.3rem; color: var(--accent); font-weight: 700; }
+  figure { margin: 1.4rem 0; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 1rem; }
+  figure img { width: 100%; height: auto; border-radius: 6px; }
+  figcaption { font-size: 0.9rem; color: var(--muted); margin-top: 0.6rem; }
+  footer { margin-top: 3rem; padding: 1.6rem; text-align: center; font-size: 0.88rem; color: var(--muted); border-top: 1px solid var(--border); background: var(--card); }
+  a { color: var(--accent); }
+  ul.refs { font-size: 0.9rem; }
+  ul.refs li { margin: 0.3rem 0; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="crumb"><a href="index.html">Systems Insight Pipeline</a> / Guide</div>
+  <h1>Reading trajectories: the classic shapes</h1>
+  <p>The central idea of system dynamics is that <em>structure produces behaviour</em>: a handful of
+  feedback-loop patterns generate almost every trajectory you will ever see. Learn the shapes once,
+  and every simulation plot becomes a diagnosis of the loops behind it.</p>
+</header>
+
+<main>
+
+<h2>Plotting trajectories in SIP</h2>
+
+<p><code>plots.plot_trajectories</code> shows how any variable evolves over time across the
+uncertainty ensemble — either as a median with a percentile band, or as "spaghetti" (individual
+parameter draws, which reveals qualitatively different behaviours the median can hide):</p>
+
+<pre><code>import numpy as np
+from sip_systemsinsightpipeline import Extract, SDM
+from sip_systemsinsightpipeline.plots import plot_trajectories
+
+s = Extract("Insulation_PeakEnergy.xlsx").extract_settings()
+s.seed = 0; s.N = 200; s.t_end = 15; s.time_unit = "years"
+s.parameter_value_aux = 0.3; s.parameter_value_stocks = 0.1
+sdm = SDM(s)
+
+sdm.t_eval = np.linspace(0, s.t_end, 50)   # record 50 points -> smooth curves
+sdm.run_simulations()
+
+plot_trajectories(sdm)                                        # VOI, first intervention
+plot_trajectories(sdm, interventions="all", kind="band")      # compare interventions
+plot_trajectories(sdm, variables=["Perceived cost savings"],  # any variable
+                  kind="spaghetti")</code></pre>
+
+<div class="callout">
+  <span class="t">Record enough time points</span>
+  By default the solver only <em>records</em> the first and last time point (enough for rankings and
+  optimization, which read the endpoint). For trajectory plots, set
+  <code>sdm.t_eval = np.linspace(0, s.t_end, 50)</code> <strong>before</strong> calling
+  <code>run_simulations()</code> — the function warns if you forget. The integrator's internal
+  accuracy is unaffected either way; this only controls where the solution is saved.
+</div>
+
+<h2>The six shapes and the loops behind them</h2>
+
+<p>Every panel below was generated <em>by SIP itself</em>, from a tiny causal-loop model whose stock
+equations are written in the Excel <code>Equation</code> column with fixed coefficients — the same
+machinery as any other model in this documentation.</p>
+
+<figure>
+  <img src="img/archetypes.png" alt="Six panels: exponential growth, goal-seeking, S-shaped growth, overshoot and collapse, oscillation, and goal-seeking with delay">
+  <figcaption>The classic trajectory shapes. R = reinforcing (self-amplifying) loop; B = balancing
+  (self-correcting) loop. Each panel's generating equations are shown in italics.</figcaption>
+</figure>
+
+<table>
+  <tr><th>Shape</th><th>Loop structure</th><th>Typical real-world examples</th><th>Learn more</th></tr>
+  <tr>
+    <td><strong>Exponential growth</strong></td>
+    <td>A dominant <strong>reinforcing (R)</strong> loop: the stock feeds its own growth.</td>
+    <td>Compound interest, early epidemic spread, viral adoption, arms races.</td>
+    <td><a href="https://en.wikipedia.org/wiki/Exponential_growth">Exponential growth</a>,
+        <a href="https://en.wikipedia.org/wiki/Positive_feedback">positive feedback</a></td>
+  </tr>
+  <tr>
+    <td><strong>Goal-seeking</strong></td>
+    <td>A <strong>balancing (B)</strong> loop: the gap to a goal drives correction, so the response
+        fades as the gap closes.</td>
+    <td>Thermostats, inventory restocking, body temperature, market price adjustment.</td>
+    <td><a href="https://en.wikipedia.org/wiki/Negative_feedback">Negative feedback</a>,
+        <a href="https://en.wikipedia.org/wiki/Exponential_decay">exponential decay</a></td>
+  </tr>
+  <tr>
+    <td><strong>S-shaped growth</strong></td>
+    <td>R dominates while small, then a B loop (carrying capacity) takes over — the crossover is the
+        inflection point.</td>
+    <td>Product/technology diffusion, epidemics running out of susceptibles, population growth.</td>
+    <td><a href="https://en.wikipedia.org/wiki/Logistic_function">Logistic function</a>,
+        <a href="https://en.wikipedia.org/wiki/Diffusion_of_innovations">diffusion of innovations</a></td>
+  </tr>
+  <tr>
+    <td><strong>Overshoot &amp; collapse</strong></td>
+    <td>An R loop grows on a <strong>finite, eroding resource</strong>; by the time the B loop bites,
+        the resource is gone and both crash.</td>
+    <td>Overgrazing/overfishing, boom-bust markets, reindeer on St. Matthew Island,
+        <em>The Limits to Growth</em> scenarios.</td>
+    <td><a href="https://en.wikipedia.org/wiki/Overshoot_(population)">Overshoot</a>,
+        <a href="https://en.wikipedia.org/wiki/The_Limits_to_Growth">The Limits to Growth</a></td>
+  </tr>
+  <tr>
+    <td><strong>Oscillation</strong></td>
+    <td>Coupled loops with <strong>lags</strong>: each stock keeps responding to where the other
+        <em>was</em>, perpetually over-correcting.</td>
+    <td>Predator–prey cycles, commodity/hog cycles, business cycles, supply-chain bullwhip.</td>
+    <td><a href="https://en.wikipedia.org/wiki/Lotka%E2%80%93Volterra_equations">Lotka–Volterra equations</a>,
+        <a href="https://en.wikipedia.org/wiki/Bullwhip_effect">bullwhip effect</a></td>
+  </tr>
+  <tr>
+    <td><strong>Goal-seeking with delay</strong></td>
+    <td>A B loop acting through a <strong>delay</strong>: correction arrives late, so the system
+        overshoots the goal and rings before settling (damped oscillation).</td>
+    <td>Shower-temperature adjustment, hiring against a backlog, policy with implementation lags.</td>
+    <td><a href="https://en.wikipedia.org/wiki/Damping">Damping</a>,
+        <a href="https://en.wikipedia.org/wiki/Control_theory">control theory</a></td>
+  </tr>
+</table>
+
+<div class="callout read">
+  <span class="t">How to use this when you model</span>
+  Trajectory shapes are a two-way diagnostic. <strong>Forward:</strong> if your diagram's dominant
+  loop is reinforcing, expect exponential take-off until some balancing structure engages — if the
+  simulation shows otherwise, a loop is missing or a polarity is wrong. <strong>Backward:</strong> if
+  your simulated outcome oscillates, look for a balancing loop with a delay; if it collapses after
+  growth, look for an eroding resource. In SIP, <a href="tutorial-insulation.html#ltm">Loops That
+  Matter</a> makes this diagnosis quantitative: it tells you <em>which</em> loop dominates at each
+  moment, so a shape change on the plot should line up with a dominance crossover in the LTM chart.
+  And if trajectories look flat when you expected dynamics, check the
+  <a href="tutorial-minimal.html">stock/auxiliary classification</a> — a system with no stocks has
+  no memory and cannot exhibit any of these shapes.
+</div>
+
+<h2>References</h2>
+<ul class="refs">
+  <li>Sterman, J. D. (2000). <em>Business Dynamics: Systems Thinking and Modeling for a Complex
+  World.</em> McGraw-Hill — chapter 4, "Structure and Behavior of Dynamic Systems," is the canonical
+  treatment of these shapes.</li>
+  <li>Meadows, D. H. (2008). <em>Thinking in Systems: A Primer.</em> Chelsea Green — the most
+  accessible introduction to stocks, flows and feedback for non-specialists.</li>
+  <li>Meadows, D. H. et&nbsp;al. (1972). <em>The Limits to Growth.</em> Universe Books — the
+  overshoot-and-collapse archetype at world scale.</li>
+  <li>Wikipedia:
+  <a href="https://en.wikipedia.org/wiki/System_dynamics">System dynamics</a> ·
+  <a href="https://en.wikipedia.org/wiki/Causal_loop_diagram">Causal loop diagram</a> ·
+  <a href="https://en.wikipedia.org/wiki/Stock_and_flow">Stock and flow</a> ·
+  <a href="https://en.wikipedia.org/wiki/System_archetype">System archetype</a></li>
+  <li>Uleman, J.F. et&nbsp;al. <em>Diagrams-to-Dynamics (D2D)</em>, BMC Medicine (in press),
+  <a href="https://arxiv.org/abs/2508.05659">arXiv:2508.05659</a> — the method SIP builds on.</li>
+</ul>
+
+</main>
+
+<footer>
+  <a href="index.html">Systems Insight Pipeline</a> ·
+  <a href="tutorial-minimal.html">Minimal tutorial</a> ·
+  <a href="tutorial-insulation.html">Insulation tutorial</a> ·
+  <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline">GitHub</a>
+</footer>
+
+</body>
+</html>

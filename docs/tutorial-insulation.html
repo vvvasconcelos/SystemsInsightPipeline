@@ -330,7 +330,11 @@ plot_simulated_intervention_ranking(s, effects[voi], voi, top_plot=15)</code></p
   questions of each curve: How long until the effect is material (does it fit the policy horizon)?
   Is it still growing at year 15 (the ranking, which reads the endpoint, then <em>understates</em>
   long-run differences)? And does the band widen over time (compounding uncertainty — typical when
-  reinforcing loops are active)?
+  reinforcing loops are active)? To recognise these shapes — goal-seeking, S-shaped, overshoot,
+  oscillation — and the loop structure each implies, see
+  <a href="trajectories-and-archetypes.html">Reading trajectories: the classic shapes</a>; the
+  <code>plots.plot_trajectories(sdm, ...)</code> helper draws them for any variable and
+  intervention.
 </div>
 
 <h3>7.3 — Sensitivity analysis: which assumptions matter?</h3>
@@ -507,6 +511,27 @@ Identified 300 feedback loops:
   <tr><td>8</td><td>Optimize the budget (mind <code>maximize=</code>!); read the allocation plots</td><td>Python</td></tr>
   <tr><td>9</td><td>Check which feedback loops drive the behavior</td><td>Python</td></tr>
 </table>
+
+<h2><span class="n">11</span>Further reading</h2>
+
+<ul>
+  <li><strong>Participatory modelling:</strong> this diagram came from stakeholder sessions — see
+  <a href="https://en.wikipedia.org/wiki/Group_model_building">group model building</a> and
+  Vennix, J. A. M. (1996), <em>Group Model Building: Facilitating Team Learning Using System
+  Dynamics</em>. The SEVEN project's report on this work is
+  <a href="https://seven.uva.nl/en/content/news/2026/03/kgg-report.html">here</a>.</li>
+  <li><strong>Reading the dynamics:</strong> our guide to
+  <a href="trajectories-and-archetypes.html">trajectory shapes and the classic archetypes</a>;
+  Sterman, J. D. (2000), <em>Business Dynamics</em>, ch. 4.</li>
+  <li><strong>Loops That Matter:</strong> Schoenberg, W., Davidsen, P. &amp; Eberlein, R. (2020).
+  Understanding model behavior using the Loops that Matter method. <em>System Dynamics Review</em>,
+  36(2), 158–190.</li>
+  <li><strong>The method behind SIP:</strong> Uleman, J.F. et&nbsp;al.,
+  <em>Diagrams-to-Dynamics (D2D)</em>, BMC Medicine (in press),
+  <a href="https://arxiv.org/abs/2508.05659">arXiv:2508.05659</a>; and
+  <a href="sensitivity-methods.html">choosing a sensitivity method</a> for the
+  uncertainty-analysis theory.</li>
+</ul>
 
 <div class="next">
   <a href="tutorial-minimal.html"><strong>Same tutorial, smallest possible model →</strong>
