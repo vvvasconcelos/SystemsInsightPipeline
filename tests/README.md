@@ -22,6 +22,7 @@ pytest tests/test_equations.py -v
 | `test_parameters.py` | Named parameters shared across equations and their ranges in every sampler (simulations, GSA, scenario discovery, optimizer, LTM). |
 | `test_ltm.py` | Loops That Matter: canonical loop enumeration and names, custom-equation stocks, time. |
 | `test_gsa.py`, `test_scenario_discovery.py`, `test_optimizer.py`, `test_trajectories.py` | Analysis modules. |
+| `test_plots.py` | Plot layout: the ranking plot's title and default x-label stay within the figure; `top_plot` and `order` leave out the variable of interest. |
 | `test_smoke_minimal.py`, `test_equation_linear_path.py` | End-to-end and historical regressions. |
 | `test_tutorial_models.py` + `data/golden_tutorials.json` | Golden values of the public tutorial models Minimal, Insulation_PeakEnergy, Insulation_Decisions and StockFlow (simulations, effects, loop scores and names). |
 | `test_tutorial_stockflow.py` | The stock-and-flow tutorial model `tutorials/StockFlow.xlsx`: stocks integrating their net flows, a transfer with a shared named parameter and the Parameters sheet, a policy that ramps in with `t` (non-zero baseline, baseline-subtracted effects), its loops, RK4, `run_GSA(method="delta")` and `sample_outcomes`. |

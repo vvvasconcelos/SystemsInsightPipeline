@@ -15,6 +15,15 @@
   for the features it exercises. `python tests/test_tutorial_models.py --update <case> ...`
   regenerates only the named cases.
 
+### Fixed
+
+- `plot_simulated_intervention_ranking`: the default x-label takes two lines and a long title
+  is wrapped, so both stay within the plot. The 0.6.0 label was wider than the plot area, and
+  long outcome names ran past the figure. `top_plot` no longer counts the variable of interest,
+  which is never drawn (`top_plot=15` showed 14 interventions in the Insulation tutorial). The
+  tutorials' ranking plots and the two ranking figures of the docs were redrawn; the docs
+  figures also had two titles printed over each other.
+
 ## 0.6.0 — 2026-11-21
 
 Resolves the 22 issues of the external review of 0.5.0 (see

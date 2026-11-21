@@ -1,3 +1,5 @@
+import textwrap
+
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -67,7 +69,6 @@ def plot_trajectories(sdm, variables=None, interventions=None, kind="band",
     By default the solver only *records* the first and last time point. For smooth curves,
     set ``sdm.t_eval = np.linspace(0, s.t_end, 50)`` **before** calling ``run_simulations``.
     """
-    import textwrap
     import warnings as _warnings
 
     if getattr(sdm, "df_sol_per_sample", None) is None:
@@ -150,8 +151,14 @@ def plot_simulated_intervention_ranking(s, intervention_effects, voi, top_plot=N
     ``intervention_effects`` is one VOI's entry of ``SDM.get_intervention_effects()``: by default
     the change at the final time relative to the no-intervention baseline. Pass ``xlabel`` to
     describe other inputs (e.g. raw final values from ``relative_to=None``).
+
+    The figure is 5 inches wide and long intervention names extend to the left of it. Jupyter
+    shows the whole figure; to save it, use ``fig.savefig(path, bbox_inches="tight")``.
     """
     df_SA = pd.DataFrame(intervention_effects)
+    # An intervention on the variable of interest itself is not shown. It is left out before the
+    # ranking, so that top_plot counts only the other interventions.
+    df_SA = df_SA.drop(columns=[voi], errors="ignore")
     df_SA = df_SA.reindex(columns=list(
         df_SA.abs().median().sort_values(ascending=False).index))
 
@@ -159,10 +166,7 @@ def plot_simulated_intervention_ranking(s, intervention_effects, voi, top_plot=N
         df_SA = df_SA[list(df_SA.columns)[:top_plot]]  # Take only the top X interventions to plot
 
     if order is not None:
-        df_SA = df_SA[order]
-
-    if voi in df_SA.columns:
-        df_SA = df_SA.drop(voi, axis=1)  # Remove the variable of interest as intervention variable from the plot
+        df_SA = df_SA[[name for name in order if name != voi]]
 
     name_with_intervention = []
 
@@ -192,12 +196,14 @@ def plot_simulated_intervention_ranking(s, intervention_effects, voi, top_plot=N
     ax = fig.add_subplot(111)
     sns.boxplot(data=df_SA, showfliers=False, whis=True, orient='h', palette=palette)
     plt.vlines(x=0, ymin=-0.5, ymax=len(df_SA.columns) - 0.6, colors='black', linestyles='dashed')
-    plt.title("Effect on " + " ".join(voi.split("_")))
+    # Title and default label are kept narrower than the axes: a long outcome name is wrapped, and
+    # the label takes two lines.
+    plt.title("\n".join(textwrap.wrap("Effect on " + " ".join(voi.split("_")), 46)))
     # Effects are the change in the outcome at the final time point relative to the
     # no-intervention baseline (model units), not standardized scores.
     if xlabel is None:
         xlabel = ("Effect after " + str(s.t_end) + " " + str(getattr(s, "time_unit", "time units"))
-                  + " (vs. no-intervention baseline, model units)")
+                  + "\n(vs. no-intervention baseline, model units)")
     plt.xlabel(xlabel)
     plt.ylabel("")
     return fig
