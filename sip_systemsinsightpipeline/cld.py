@@ -1,9 +1,6 @@
-import os
+import re
 import pandas as pd
 import numpy as np
-import os
-import datetime
-import json
 import warnings
 import networkx as nx
 from types import SimpleNamespace
@@ -30,7 +27,10 @@ class Extract:
                                    "solve_analytically" : 0,
                                    "double_factor_interventions" : 0})  # Default to single-factor interventions
         else:
-            print("No interaction terms specified so will solve linear SDM.")
+            if getattr(self, "equations", None):
+                print("No interaction terms specified; the custom equations are integrated numerically.")
+            else:
+                print("No interaction terms specified so will solve linear SDM.")
             s = SimpleNamespace(**{"interaction_terms" : 0,
                                    "solve_analytically" : 0,
                                    "double_factor_interventions" : 0})
@@ -72,8 +72,8 @@ class Extract:
             
             s.intervention_variables += double_intervention_variables
 
-        self.df_adj.rename(index=dict(zip(self.variables, s.variables)),
-                           columns=dict(zip(self.variables, s.variables)), inplace=True)
+        self.df_adj = self.df_adj.rename(index=dict(zip(self.variables, s.variables)),
+                                         columns=dict(zip(self.variables, s.variables)))
 
         s.df_adj = self.df_adj  # Save the adjacency matrix to the settings
         s.interactions_matrix = self.interactions_matrix # Save the interactions matrix to the settings
@@ -93,7 +93,9 @@ class Extract:
         # Add custom equations to settings
         s.equations = self.equations if hasattr(self, 'equations') else {}
         s.equation_warnings = self.equation_warnings if hasattr(self, 'equation_warnings') else []
-            
+        # Ranges of named equation parameters (#name) from the optional Parameters sheet
+        s.parameter_priors = dict(getattr(self, 'parameter_priors', {}))
+
         self.s = s  # Save the settings
 
         return s
@@ -114,7 +116,9 @@ class Extract:
         G = nx.from_numpy_array(np.array(self.df_adj).T, create_using=nx.DiGraph)
         var_names = [var for var in self.df_adj.columns]
         G = nx.relabel_nodes(G, dict(enumerate(var_names)))
-        feedback_loops = list(nx.simple_cycles(G, length_bound=max_loops_check))
+        # canonical (session-independent) loop order, see ltm.find_feedback_loops
+        from .ltm import find_feedback_loops
+        feedback_loops = find_feedback_loops(self.df_adj, max_length=max_loops_check, require_stock=False)
         num_loops = len(feedback_loops)
 
         if num_loops > 0:
@@ -199,7 +203,12 @@ class Extract:
         df_e = df_e[[col for col in base_columns if col in df_e.columns]]
         df_c = df_c[["From", "Type", "To"]]
         
-        # Extract variables from the Elements 
+        # Extract variables from the Elements
+        for row, label in enumerate(df_e["Label"]):
+            if pd.isna(label) or str(label).strip() == "":
+                raise Exception(f"Row {row + 2} of the Elements sheet has an empty Label.")
+        df_e = df_e.copy()
+        df_e["Label"] = [str(label) for label in df_e["Label"]]
         self.original_variables = list(df_e["Label"])
 
         for var in self.original_variables:
@@ -282,41 +291,47 @@ class Extract:
             # Add polarity to adjacency matrix
             self.adjacency_matrix[destination_index, origin_index] = polarity
 
-        # Create dataframe with adjacency matrix
-        self.df_adj = pd.DataFrame(self.adjacency_matrix,
+        # Create dataframe with adjacency matrix (an explicit copy, so that the DataFrame and
+        # self.adjacency_matrix never share memory, whatever the pandas version)
+        self.df_adj = pd.DataFrame(self.adjacency_matrix.copy(),
                                    columns=self.variables,
-                                   index=self.variables) 
+                                   index=self.variables)
 
-        #np.random.seed(s.seed)  # Set seed for reproducibility
-
-        constants = [var for var in self.variables 
+        constants = [var for var in self.variables
                      if self.var_to_type[var].lower() == 'constant']
 
-        ### Check if any constants have incoming links
+        ### Constants are exogenous: links into a constant are ignored (with a warning)
         for const in constants:
-            num_incoming_links = np.sum(np.abs(self.df_adj.loc[const, :]))
-            if num_incoming_links != 0:
-                print(f'Removed {num_incoming_links} incoming links for constant {const}')
+            sources = [src for src in self.variables if self.df_adj.loc[const, src] != 0]
+            if sources:
+                warnings.warn(f"Constant '{const}' has {len(sources)} incoming link(s) (from {sources}); "
+                              "constants are exogenous, so these links are ignored. Make it a stock or "
+                              "an auxiliary if it should depend on other variables.")
                 self.df_adj.loc[const, :] = 0
-                #else:
-                #    raise(Exception(f'Number of incoming links for constant {const} is {num_links}, should be zero.'))
+        self.adjacency_matrix = self.df_adj.to_numpy(dtype=float, copy=True)
+
+        # Variables with a custom equation may have no incoming links (e.g. a clock, dC/dt = 1)
+        with_equation = set()
+        if self.has_equations:
+            for label, eq in zip(df_e["Label"], df_e["Equation"]):
+                if not (pd.isna(eq) or str(eq).strip() == ""):
+                    with_equation.add(self.original_to_cleaned_var[label])
 
         for var in self.variables:
-            if var not in constants:
+            if var not in constants and var not in with_equation:
                 num_incoming_links = np.sum(np.abs(self.df_adj.loc[var, :]))
-                #if num_incoming_links != 0:
                 if num_incoming_links == 0:
-                    #print(f'Removed {num_incoming_links} incoming links for variable {var}')
-                    #self.df_adj.loc[var, :] = 0
-                    raise(Exception(f'Number of incoming links for (non-constant) variable {var} is {num_incoming_links}, should be at least one.'))
+                    raise(Exception(f'Number of incoming links for (non-constant) variable {var} is 0, '
+                                    'should be at least one (or give the variable a custom Equation).'))
 
         self.check_loops(df_e, df_c)  # Check for stocks in loops and ratio of balancing loops
-        
+
         # Parse custom equations if present
         self.equations = {}
         self.equation_warnings = []
         if self.has_equations:
             self._parse_equations(df_e)
+        self.parameter_priors = self._read_parameter_priors()
 
     def _parse_equations(self, df_e):
         """
@@ -326,38 +341,45 @@ class Extract:
         Uses # symbol for parameters (positive range) and supports np.FUNCTION syntax.
         """
         from .equations import EquationParser
-        
-        parser = EquationParser(self.variables)
-        
+
+        parser = EquationParser(self.variables, var_types=self.var_to_type)
+
         for idx, row in df_e.iterrows():
             label = row['Label']
             equation = row.get('Equation', None)
-            
+
             if pd.isna(equation) or str(equation).strip() == '':
                 continue
-            
+
             # Find cleaned variable name
             var_name = self.original_to_cleaned_var.get(label, label)
-            
+
             if var_name not in self.variables:
                 continue
-            
+
             # Get incoming links from adjacency matrix
             incoming_links = [
-                col for col in self.df_adj.columns 
+                col for col in self.df_adj.columns
                 if self.df_adj.loc[var_name, col] != 0
             ]
-            
+
             # Parse the equation
             parsed = parser.parse_equation(var_name, str(equation), incoming_links)
-            
+
             if parsed['is_valid']:
                 self.equations[var_name] = parsed
-                
+                if self.var_to_type.get(var_name) == 'constant':
+                    message = (f"Equation of constant '{var_name}' is ignored: constants are exogenous. "
+                               "Make it an auxiliary (or a stock) to use the equation.")
+                    warnings.warn(message)
+                    self.equation_warnings.append(f"[{var_name}] {message}")
+
                 # Print equation info
                 print(f"Custom equation for '{var_name}': {equation}")
                 print(f"  Variables used: {parsed['variables_used']}")
                 print(f"  Parameters (#): {parsed['n_parameters']}")
+                if parsed.get('named_parameters'):
+                    print(f"  Named parameters: {', '.join('#' + p for p in parsed['named_parameters'])}")
                 if parsed.get('has_intervention', False):
                     print(f"  Intervention ($): Yes - intervention applied within equation")
                 else:
@@ -376,15 +398,73 @@ class Extract:
                     print(f"   {warning}")
                 raise ValueError(f"Invalid equation for '{var_name}': {parsed['validation_warnings']}")
 
+    def _read_parameter_priors(self):
+        """Read the optional 'Parameters' sheet: one row per named parameter (#name).
+
+        Columns ``Name`` (with or without the leading ``#``), ``Low`` and ``High``. Each named
+        parameter is drawn uniformly from ``[Low, High]`` (``Low == High`` fixes it). Named
+        parameters that are not listed default to ``[0, parameter_value_aux]``. Numbered
+        parameters (``#1``, ``#2``, ``#``) are local to their equation and cannot be listed.
+        """
+        with pd.ExcelFile(self.file_path) as xl:
+            sheets = {str(name).strip().lower(): name for name in xl.sheet_names}
+            if "parameters" not in sheets:
+                return {}
+            df_p = xl.parse(sheets["parameters"])
+        cols = {str(c).strip().lower(): c for c in df_p.columns}
+        missing = [c for c in ("name", "low", "high") if c not in cols]
+        if missing:
+            raise ValueError("The Parameters sheet needs the columns Name, Low and High "
+                             f"(missing: {', '.join(m.capitalize() for m in missing)}).")
+        priors = {}
+        for row, record in df_p.iterrows():
+            raw = record[cols["name"]]
+            if pd.isna(raw) or str(raw).strip() == "":
+                continue
+            name = str(raw).strip()
+            name = name[1:].strip() if name.startswith("#") else name
+            where = f"Parameters sheet, row {row + 2}"
+            if re.fullmatch(r"\d+", name):
+                raise ValueError(f"{where}: '#{name}' is a numbered parameter. Numbered parameters "
+                                 "(#1, #2, #) are local to each equation and always range over "
+                                 "[0, parameter_value_aux]; give the parameter a name (e.g. #rate) "
+                                 "to set its range.")
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", name):
+                raise ValueError(f"{where}: invalid parameter name {raw!r}. Names start with a letter "
+                                 "and contain only letters, digits and underscores.")
+            low = pd.to_numeric(record[cols["low"]], errors="coerce")
+            high = pd.to_numeric(record[cols["high"]], errors="coerce")
+            if pd.isna(low) or pd.isna(high):
+                raise ValueError(f"{where}: parameter '#{name}' needs numeric Low and High values.")
+            if low > high:
+                raise ValueError(f"{where}: parameter '#{name}' has Low ({low}) > High ({high}).")
+            if name in priors:
+                raise ValueError(f"{where}: parameter '#{name}' is listed more than once.")
+            priors[name] = (float(low), float(high))
+
+        used = set()
+        for parsed in self.equations.values():
+            used.update(parsed.get("named_parameters", []))
+        unused = sorted(set(priors) - used)
+        if unused:
+            warnings.warn("Parameters sheet lists parameter(s) not used in any equation: "
+                          + ", ".join("#" + p for p in unused))
+        if priors:
+            print("Named parameter ranges: " + ", ".join(f"#{p} in [{lo:g}, {hi:g}]"
+                                                         for p, (lo, hi) in priors.items()))
+        return priors
+
     def extract_interactions_matrix(self):
         """Extract the interactions matrix from the 'Interactions' sheet in the Kumu Excel file."""
         wb = load_workbook(self.file_path, read_only=True)   # open an Excel file and return a workbook
-        
+        sheet_names = list(wb.sheetnames)
+        wb.close()  # read-only workbooks keep the file open until closed
+
         # Create an empty matrix to annotate interactions
         num_variables = len(self.variables)
         self.interactions_matrix = np.zeros((num_variables, num_variables, num_variables))
 
-        if 'Interactions' in wb.sheetnames:
+        if 'Interactions' in sheet_names:
             df_i = pd.read_excel(self.file_path, sheet_name="Interactions")
             df_i = df_i[["From1", "From2", "Type", "To"]]
 
