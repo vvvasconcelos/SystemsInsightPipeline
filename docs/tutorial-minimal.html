@@ -294,6 +294,19 @@ exists. A stock's equation is its rate of change, so a stock may refer to its ow
 goal seeking) without a self-arrow; to make a stock integrate a flow exactly, give it the equation
 <code>Flow</code>.</p>
 
+<div class="callout tip">
+  <span class="t">A complete stock-and-flow model in equations</span>
+  <code>tutorials/StockFlow.xlsx</code> is a small synthetic model written the way applied system
+  dynamics models are written: trainees become certified installers, who retrofit homes. Its four
+  stocks integrate their net flows; the transfer from <code>Trainees</code> to
+  <code>Certified installers (FTE)</code> uses the shared rate <code>#completion_rate</code>, with
+  its range in a <code>Parameters</code> sheet; a national programme ramps in with <code>t</code>, so
+  even the no-intervention baseline moves; and balancing and reinforcing loops take turns in driving
+  the behaviour. Its
+  <a href="https://github.com/vvvasconcelos/SystemsInsightPipeline/blob/main/tutorials/StockFlow.ipynb">notebook</a>
+  runs every analysis on it, including Loops That Matter and global sensitivity analysis.
+</div>
+
 <h2><span class="n">7</span>Simulate, and read each graph carefully</h2>
 
 <pre><code>df_sol_per_sample, param_samples = sdm.run_simulations()

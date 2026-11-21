@@ -110,6 +110,7 @@ print(result["best_effect_size"], result["best_intensities"])
 | [`tutorials/Minimal.ipynb`](tutorials/Minimal.ipynb) | Start here: the Excel format and the full workflow on a 3-variable model (< 1 min) |
 | [`tutorials/Insulation.ipynb`](tutorials/Insulation.ipynb) | A real-world model of household peak energy use from the [SEVEN project](https://seven.uva.nl/): ranking, sensitivity analysis, budget minimization over 51 interventions, Loops That Matter |
 | [`tutorials/GSA_and_Scenario_Discovery.ipynb`](tutorials/GSA_and_Scenario_Discovery.ipynb) | Global sensitivity analysis (Sobol) and scenario discovery (PRIM/CART) on the insulation model: which assumptions drive the outcome, and which conditions make it go wrong |
+| [`tutorials/StockFlow.ipynb`](tutorials/StockFlow.ipynb) | A stock-and-flow model written entirely in custom equations ([`StockFlow.xlsx`](tutorials/StockFlow.xlsx), synthetic, 11 variables): stocks integrating their flows, a transfer with a shared named parameter and a `Parameters` sheet, a policy that ramps in with time, effects against a non-zero baseline, Loops That Matter, Borgonovo δ, fixed-step RK4 (< 1 min) |
 
 The Alzheimer's disease example from the D2D paper (see Citation) is available in the upstream
 [jerul/systemdynamics](https://github.com/jerul/systemdynamics) repository.
@@ -183,7 +184,9 @@ without a self-link, while an auxiliary that refers to itself is rejected (an al
 To make a stock integrate a flow exactly, give the stock the equation `Flow` (or
 `Inflow - Outflow`). Without an equation, every incoming link has an uncertain, sampled
 coefficient — the right default for a qualitative diagram, but not for a known stock-and-flow
-structure.
+structure. [`tutorials/StockFlow.xlsx`](tutorials/StockFlow.xlsx) is a complete model of this
+kind (a transfer between two stocks with a shared named parameter, a `Parameters` sheet, a policy
+that ramps in with `t`), walked through in [`tutorials/StockFlow.ipynb`](tutorials/StockFlow.ipynb).
 
 ### How intervention effects are defined
 

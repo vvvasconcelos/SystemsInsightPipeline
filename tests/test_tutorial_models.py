@@ -3,13 +3,21 @@
 ``tests/data/golden_tutorials.json`` holds, for each tutorial workbook, the simulated variable of
 interest per intervention and parameter sample, the intervention effects, every variable of one
 run, and the Loops That Matter scores of one parameter draw (keyed by a hash of each loop's
-canonical member list, with its R/B name). The values were produced by SIP 0.5.0 (commit ad14fae) and are
-reproduced exactly by 0.6.0: the fixes of the external review do not change results for these
-models (their zero state is an equilibrium, their names contain no substrings of each other).
+canonical member list, with its R/B name). The values of Minimal and the two Insulation models
+were produced by SIP 0.5.0 (commit ad14fae) and are reproduced exactly by 0.6.0: the fixes of the
+external review do not change results for these models (their zero state is an equilibrium, their
+names contain no substrings of each other).
+
+StockFlow (added after the 0.6.0 release) is the opposite case, a stock-and-flow model in custom
+equations as applied models are written: stocks integrating their net flows, a transfer with a
+named parameter shared by two equations and its range in the Parameters sheet, a policy that ramps
+in with time ``t`` (so the baseline is not zero and effects are baseline-subtracted), and a name
+that contains another name. Its values were produced by 0.6.0 (commit 8bd14a9).
 
 Any change to these numbers must be deliberate. After such a change, regenerate the file with::
 
-    python tests/test_tutorial_models.py --update
+    python tests/test_tutorial_models.py --update              # every case
+    python tests/test_tutorial_models.py --update StockFlow    # only the named case(s)
 
 and explain the difference in the commit message.
 """
@@ -31,6 +39,7 @@ CASES = {
     "Minimal": dict(file="Minimal.xlsx", seed=12345, N=5, t_end=10, pva=0.1, pvs=0.1),
     "Insulation_PeakEnergy": dict(file="Insulation_PeakEnergy.xlsx", seed=12345, N=4, t_end=10, pva=0.1, pvs=0.1),
     "Insulation_Decisions": dict(file="Insulation_Decisions.xlsx", seed=7, N=3, t_end=5, pva=0.2, pvs=0.2),
+    "StockFlow": dict(file="StockFlow.xlsx", seed=12345, N=5, t_end=20, pva=0.2, pvs=0.2),
 }
 
 
@@ -109,8 +118,16 @@ def test_tutorial_model_matches_golden_values(name, golden):
 
 if __name__ == "__main__":
     if "--update" not in sys.argv:
-        sys.exit("Run with --update to regenerate tests/data/golden_tutorials.json")
+        sys.exit("Run with --update [case ...] to regenerate tests/data/golden_tutorials.json")
     sys.path.insert(0, str(HERE.parent))
-    data = {name: fingerprint(name) for name in CASES}
+    # Only the named cases are recomputed (all cases if none is named); the others keep their
+    # stored values, so that adding a model does not rewrite the others with platform noise.
+    names = [arg for arg in sys.argv[1:] if arg != "--update"] or list(CASES)
+    unknown = sorted(set(names) - set(CASES))
+    if unknown:
+        sys.exit(f"Unknown case(s) {unknown}; the cases are {list(CASES)}")
+    data = json.loads(GOLDEN.read_text(encoding="utf-8")) if GOLDEN.exists() else {}
+    data.update({name: fingerprint(name) for name in names})
+    data = {name: data[name] for name in CASES if name in data}
     GOLDEN.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-    print(f"wrote {GOLDEN}")
+    print(f"wrote {GOLDEN} ({', '.join(names)})")

@@ -23,7 +23,8 @@ pytest tests/test_equations.py -v
 | `test_ltm.py` | Loops That Matter: canonical loop enumeration and names, custom-equation stocks, time. |
 | `test_gsa.py`, `test_scenario_discovery.py`, `test_optimizer.py`, `test_trajectories.py` | Analysis modules. |
 | `test_smoke_minimal.py`, `test_equation_linear_path.py` | End-to-end and historical regressions. |
-| `test_tutorial_models.py` + `data/golden_tutorials.json` | Golden values of the public tutorial models (simulations, effects, loop scores and names). |
+| `test_tutorial_models.py` + `data/golden_tutorials.json` | Golden values of the public tutorial models Minimal, Insulation_PeakEnergy, Insulation_Decisions and StockFlow (simulations, effects, loop scores and names). |
+| `test_tutorial_stockflow.py` | The stock-and-flow tutorial model `tutorials/StockFlow.xlsx`: stocks integrating their net flows, a transfer with a shared named parameter and the Parameters sheet, a policy that ramps in with `t` (non-zero baseline, baseline-subtracted effects), its loops, RK4, `run_GSA(method="delta")` and `sample_outcomes`. |
 | `test_external_models.py` | Optional checks on private models (see below). Skipped unless `SIP_EXTRA_MODELS` is set. |
 
 Markers (see `pytest.ini`): `slow` for tests that start subprocesses, `external` for the private
@@ -43,13 +44,21 @@ model checks.
 change is *meant* to alter those numbers, regenerate the file and explain why in the commit:
 
 ```sh
-python tests/test_tutorial_models.py --update
+python tests/test_tutorial_models.py --update              # every case
+python tests/test_tutorial_models.py --update StockFlow    # only the named case(s)
 ```
+
+Name the cases you meant to change (or add): regenerating every case on another platform rewrites
+the others with floating-point noise (about 1e-11 relative), which the tests tolerate but the diff
+does not hide.
 
 ## Private models (`SIP_EXTRA_MODELS`)
 
-Models that cannot be published can still be used as regression tests. Put the workbooks in a
-folder outside the repository and point `SIP_EXTRA_MODELS` at it:
+Models that cannot be published can still be used as regression tests. For tests and examples in
+the repository, use the public `tutorials/StockFlow.xlsx` instead: it has the structure of an
+applied stock-and-flow model (stocks integrating their flows, shared named parameters, a policy in
+time) without anyone's data. Put the private workbooks in a folder outside the repository and
+point `SIP_EXTRA_MODELS` at it:
 
 ```powershell
 $env:SIP_EXTRA_MODELS = "C:\path\to\private_models"

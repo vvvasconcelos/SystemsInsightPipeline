@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `tutorials/StockFlow.xlsx`, a public synthetic stock-and-flow model written entirely in custom
+  equations, the way applied models are: four stocks that integrate their net flows, a transfer
+  between two of them with the shared named parameter `#completion_rate`, a `Parameters` sheet, a
+  local parameter, a policy that ramps in with `t` (so the baseline is not zero), balancing and
+  reinforcing loops, three levers and names with punctuation. The notebook
+  `tutorials/StockFlow.ipynb` walks through it (effects against the baseline, Loops That Matter,
+  Borgonovo δ, `sample_outcomes`, fixed-step RK4).
+- Its golden values in `tests/data/golden_tutorials.json`, and `tests/test_tutorial_stockflow.py`
+  for the features it exercises. `python tests/test_tutorial_models.py --update <case> ...`
+  regenerates only the named cases.
+
 ## 0.6.0 — 2026-11-21
 
 Resolves the 22 issues of the external review of 0.5.0 (see
