@@ -326,10 +326,13 @@ def moment_independent(X, y, names: Sequence[str], *, method: str = "delta",
         from SALib.analyze import delta as _delta
         Si = _delta.analyze(problem, X, y, num_resamples=int(n_bootstrap),
                             conf_level=float(conf_level), seed=seed, print_to_console=False)
+        # SALib < 1.6 returns 'delta'; SALib >= 1.6 returns 'delta_raw' (the same bias-reduced
+        # estimator with plain bootstrap resampling) next to 'delta_balanced'/'delta_step'.
+        delta_key = "delta" if "delta" in Si else "delta_raw"
         return pd.DataFrame({
             "parameter": names,
-            "delta": np.asarray(Si["delta"], dtype=float),
-            "delta_conf": np.asarray(Si["delta_conf"], dtype=float),
+            "delta": np.asarray(Si[delta_key], dtype=float),
+            "delta_conf": np.asarray(Si[f"{delta_key}_conf"], dtype=float),
             "S1": np.asarray(Si["S1"], dtype=float),
             "S1_conf": np.asarray(Si["S1_conf"], dtype=float),
         }).sort_values("delta", ascending=False, ignore_index=True)
