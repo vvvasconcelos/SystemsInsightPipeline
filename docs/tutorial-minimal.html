@@ -241,9 +241,11 @@ sdm = SDM(s)</code></pre>
 
 <table>
   <tr><th>Notation</th><th>Meaning</th></tr>
-  <tr><td><code>B</code>, <code>C</code></td><td>variable names, exactly as in the model</td></tr>
-  <tr><td><code>#1</code>, <code>#2</code>, …</td><td>free parameters, each sampled uniformly from <code>[0, parameter_value_aux]</code></td></tr>
+  <tr><td><code>B</code>, <code>C</code></td><td>variable names, exactly as in the model (spaces and punctuation are fine)</td></tr>
+  <tr><td><code>#1</code>, <code>#2</code>, … or <code>#</code></td><td>local free parameters, each sampled uniformly from <code>[0, parameter_value_aux]</code>; <code>#1</code> in another equation is a different parameter</td></tr>
+  <tr><td><code>#rate</code>, <code>#synergy</code>, …</td><td>named parameters: the same parameter in every equation that uses it, with its own range in a <code>Parameters</code> sheet (see below)</td></tr>
   <tr><td><code>$</code></td><td>where the intervention enters; if omitted, the default above applies</td></tr>
+  <tr><td><code>t</code></td><td>the simulation time, e.g. <code>K * (t &gt; 2)</code> switches <code>K</code> on at <code>t = 2</code></td></tr>
   <tr><td><code>np.exp</code>, <code>np.tanh</code>, <code>np.sqrt</code>, <code>sigmoid</code>, …</td><td>numpy functions for nonlinear shapes</td></tr>
 </table>
 
@@ -262,9 +264,35 @@ sdm = SDM(s)</code></pre>
   (<code>10*#1</code>) or flips signs (<code>-#1</code> for a coefficient known to be negative).
 </div>
 
-<p>SIP validates each equation against the diagram and warns when an equation uses a variable that
-has no incoming arrow, or silently ignores an arrow that exists — catching typos before they become
-wrong conclusions.</p>
+<h3>6.1 — Named parameters and the Parameters sheet</h3>
+<p>Instead of the scaling trick, give a parameter a <strong>name</strong> and its own range. A named
+parameter is <em>one</em> parameter wherever it appears — in one equation or in the equations of
+different variables — with one value per parameter draw. Its range comes from an optional
+<code>Parameters</code> sheet; unlisted named parameters range over <code>[0, parameter_value_aux]</code>,
+and <code>Low = High</code> fixes a value. The companion workbook
+<code>tutorials/Minimal_named_parameters.xlsx</code> writes the same model as</p>
+<pre><code>#synergy*B*C + #direct*B + #direct*C</code></pre>
+<table>
+  <tr><th>Name</th><th>Low</th><th>High</th></tr>
+  <tr><td>synergy</td><td>0</td><td>0.1</td></tr>
+  <tr><td>direct</td><td>0</td><td>0.001</td></tr>
+</table>
+<p>It states directly what the trick only implied — the synergy can be up to 100× stronger than the
+direct effects — and adds one statement: <em>B</em> and <em>C</em> have <strong>the same</strong>
+(unknown) direct effect, so their effects on <em>A</em> are now identical in every parameter sample.
+Every sampler uses these ranges (simulations, optimization, Loops That Matter, global sensitivity
+analysis and scenario discovery, which report the parameter as <code>#direct</code>). Across
+equations, a shared name is how you write one physical quantity that appears in several places: a
+transfer rate that drains one stock and fills another (<code>-#rate * S1</code> in the equation of
+<code>S1</code>, <code>#rate * S1</code> in that of <code>S2</code>) moves exactly what leaves
+<code>S1</code> into <code>S2</code>.</p>
+
+<p>SIP validates each equation when it reads the workbook. A name that is not a model variable —
+usually a typo — stops the extraction with a message that names it and the closest variable. SIP
+also warns when an equation uses a variable that has no incoming arrow, or ignores an arrow that
+exists. A stock's equation is its rate of change, so a stock may refer to its own level (decay,
+goal seeking) without a self-arrow; to make a stock integrate a flow exactly, give it the equation
+<code>Flow</code>.</p>
 
 <h2><span class="n">7</span>Simulate, and read each graph carefully</h2>
 
@@ -279,7 +307,8 @@ plot_simulated_intervention_ranking(s, effects[voi], voi)</code></pre>
 <figure>
   <img src="img/minimal_ranking.png" alt="Box plots of the simulated effect of interventions B and C on outcome A">
   <figcaption>Each box summarizes one intervention's effect on <em>A</em> at the end of the
-  timeframe, across all 200 parameter samples.</figcaption>
+  timeframe — the change relative to a run without any intervention, with the same parameters —
+  across all 200 parameter samples.</figcaption>
 </figure>
 <div class="callout read">
   <span class="t">How to read it</span>
@@ -417,7 +446,7 @@ twin</a>, where 21 real loops compete for dominance.</p>
   <tr><td>3</td><td>Choose the time unit (speed at which VOIs should visibly vary) and the timeframe</td><td>reflection</td></tr>
   <tr><td>4</td><td>Classify: slower than timeframe → constant; faster than time unit → auxiliary; in between → stock</td><td>rule of thumb</td></tr>
   <tr><td>5</td><td>Fill Elements / Connections; set <code>Type</code>, <code>VOI</code>, <code>Tags</code>; set timeframe and sampling bounds in 5 lines of Python</td><td>Excel + Python</td></tr>
-  <tr><td>6</td><td>Optional: custom equations (<code>#</code>, <code>$</code>, range-scaling trick); know the defaults</td><td>Excel</td></tr>
+  <tr><td>6</td><td>Optional: custom equations (<code>#</code>, <code>#name</code> and the Parameters sheet, <code>$</code>, <code>t</code>); know the defaults</td><td>Excel</td></tr>
   <tr><td>7</td><td>Simulate; read ranking, time courses, sensitivity analysis</td><td>Python</td></tr>
   <tr><td>8</td><td>Optimize the budget; read the allocation scatter</td><td>Python</td></tr>
   <tr><td>9</td><td>Check which feedback loops drive the behavior</td><td>Python</td></tr>

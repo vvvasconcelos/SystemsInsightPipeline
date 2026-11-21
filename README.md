@@ -21,8 +21,9 @@ interface — but custom equations are supported when you need them.
   [docs/trajectories-and-archetypes.html](docs/trajectories-and-archetypes.html) for the classic
   trajectory shapes and the loop structures behind them).
 - **Intervention ranking.** Distributions of each intervention's effect on your variable of
-  interest, with box plots, pairwise comparison tables (bootstrapped CIs, Cliff's delta), and
-  Spearman sensitivity analysis of which links drive the outcome (`get_intervention_effects`,
+  interest (the change relative to a no-intervention run with the same parameters), with box
+  plots, pairwise comparison tables (bootstrapped CIs, Cliff's delta), and Spearman sensitivity
+  analysis of which links drive the outcome (`get_intervention_effects`,
   `compare_interventions_table`, `run_SA`).
 - **Budget optimization.** Rather than one intervention at a time, allocate a budget across all
   interventions at once ([`SDMOptimizer`](sip_systemsinsightpipeline/optimizer.py)). The
@@ -41,18 +42,29 @@ interface — but custom equations are supported when you need them.
   produce an outcome of concern as interpretable boxes/rules with density and coverage
   (`discover_scenarios`, `SDM.sample_outcomes`).
 - **Custom equations.** Override the default linear link aggregation for any variable with an
-  `Equation` column entry — sampled parameters, intervention placement, numpy functions (see
-  below).
+  `Equation` column entry — sampled parameters (local or shared across equations, with ranges
+  from an optional `Parameters` sheet), intervention placement, simulation time, numpy functions
+  (see below).
 
 ## Install
+
+Requires Python ≥ 3.9. Install SIP into its own virtual environment, so that it cannot clash
+with (or be broken by) packages in an existing environment such as Anaconda's `base`:
 
 ```sh
 git clone https://github.com/vvvasconcelos/SystemsInsightPipeline.git
 cd SystemsInsightPipeline
+python -m venv .venv
+```
+
+Activate it (`.venv\Scripts\activate` on Windows, `source .venv/bin/activate` on macOS/Linux),
+then:
+
+```sh
 pip install -e .
 ```
 
-Requires Python ≥ 3.9.
+With conda, `conda create -n sip python=3.12` followed by `conda activate sip` works as well.
 
 ## Quick start
 
@@ -72,7 +84,7 @@ s.parameter_value_stocks = 0.1  # sampling bound for stock parameters
 # 2. Simulate all tagged interventions under parameter uncertainty
 sdm = SDM(s)
 df_sol_per_sample, param_samples = sdm.run_simulations()
-effects = sdm.get_intervention_effects()
+effects = sdm.get_intervention_effects()  # change vs. a no-intervention run
 
 voi = s.variable_of_interest[0]
 plot_simulated_intervention_ranking(s, effects[voi], voi)
@@ -110,42 +122,111 @@ A model is one Excel workbook, structured like a Kumu export:
 
 | Column | Meaning |
 |--------|---------|
-| `Label` | Variable name (`+` and `*` are not allowed in names) |
+| `Label` | Variable name. Spaces and punctuation such as `.`, `(`, `)`, `'` and `-` are fine; `+` and `*` are not allowed |
 | `Type` | `stock` (accumulates), `auxiliary` (instantaneous), or `constant` (exogenous); case-insensitive. Untyped variables default to stock if they have incoming links, constant otherwise |
 | `Tags` | Nonzero ⇒ the variable is an intervention with that relative strength (sign = direction) |
 | `Description` | `VOI` marks the variable of interest (the outcome) |
 | `Equation` | *(optional)* custom equation, see below |
 
 **Connections sheet** — one row per causal link: `From`, `To`, `Type` (`+` or `-` polarity).
+Every stock and auxiliary needs at least one incoming link, unless it has a custom equation
+(e.g. a clock stock with equation `1`). Constants are exogenous: links *into* a constant are
+ignored, with a warning.
 
 **Interactions sheet** — *(optional)* pairwise interaction terms: `From1`, `From2`, `To`, `Type`.
+
+**Parameters sheet** — *(optional)* ranges of named equation parameters: `Name`, `Low`, `High`
+(see below).
 
 ### Custom equations
 
 Add an `Equation` column entry to override the default linear combination of a variable's
-incoming links:
+incoming links. For an auxiliary the equation gives its value; for a stock, its rate of change.
 
-- **Variables**: use names exactly as they appear in the model
-- **Parameters**: `#` or `#1`, `#2`, … — sampled uniformly from `[0, parameter_value_aux]`
-- **Intervention**: `$` marks where the intervention enters (appended to the result if absent)
-- **Functions**: `np.exp`, `np.log`, `np.tanh`, `np.sqrt`, `sigmoid`, …
+- **Variables**: names exactly as in the Elements sheet (case-sensitive). Names are recognised
+  whole and longest first, so `Price` and `Price index` can coexist; runs of spaces count as one.
+- **Local parameters**: `#1`, `#2`, … or a bare `#` (numbered after the highest explicit number)
+  — sampled uniformly from `[0, parameter_value_aux]`. They are local: `#1` in one equation and
+  `#1` in another are different parameters.
+- **Named parameters**: `#rate`, `#k_decay`, … (a letter after `#`, then letters, digits or
+  `_`). The same name is the *same parameter in every equation* that uses it, with one value per
+  parameter draw — e.g. a rate that drains one stock and fills another. Its range comes from the
+  Parameters sheet, otherwise `[0, parameter_value_aux]`; `Low = High` fixes its value. The
+  ranges are honoured by `run_simulations`, the optimizer, Loops That Matter, `run_GSA` and
+  `sample_outcomes` (which report it as `#rate`).
+- **Intervention**: `$` marks where the intervention enters (appended to the result if absent).
+- **Time**: `t` is the simulation time, e.g. `K * (t > 2)` for a step at `t = 2`.
+- **Functions**: `np.exp`, `np.log`, `np.tanh`, `np.sqrt`, `np.minimum`, `np.where`, …, the same
+  names without `np.`, and `sigmoid`. Comparisons (`(S < 0.5)` is 1 or 0) and
+  `a if condition else b` are allowed.
 
 ```text
 #1 * A + #2 * B                  # linear with sampled coefficients
 np.exp(-#1 * A) * B              # exponential decay
 #1 * np.tanh(#2 * (A - B))       # bounded S-curve
 $ + #1 * (1 - np.exp(-#2 * A))   # saturation, intervention added explicitly
+(1 - S) * #rate                  # a stock S seeking 1 (refers to itself: no self-link needed)
+Inflow - Outflow                 # a stock integrating its flows exactly
 ```
 
-Equations are validated against the diagram: SIP warns when an equation uses variables that are
-not incoming links, or ignores links that exist in the diagram.
+| Parameters sheet: `Name` | `Low` | `High` |
+|---|---|---|
+| `rate` | 0.1 | 0.4 |
+| `k_decay` | 0.05 | 0.05 |
+
+Equations are validated when the workbook is read. Names that are not model variables (typos),
+unknown functions and syntax errors stop extraction with a message that names the offending text
+(and the closest model variable). SIP warns when an equation uses variables that are not
+incoming links, or ignores links that exist in the diagram; a stock may refer to its own level
+without a self-link, while an auxiliary that refers to itself is rejected (an algebraic loop).
+
+To make a stock integrate a flow exactly, give the stock the equation `Flow` (or
+`Inflow - Outflow`). Without an equation, every incoming link has an uncertain, sampled
+coefficient — the right default for a qualitative diagram, but not for a known stock-and-flow
+structure.
+
+### How intervention effects are defined
+
+`get_intervention_effects()` reports, for every parameter sample, the value of the variable of
+interest at the final time *minus* its value in a no-intervention run with the same parameters
+(`run_simulations` simulates that baseline, in `sdm.df_sol_baseline_per_sample`). In a pure
+causal-loop-diagram model the zero state is an equilibrium, so the baseline stays zero and the
+effect equals the final value. In models with their own dynamics (custom equations with drift,
+targets or time) the subtraction removes the drift from the effect. `relative_to=None` returns the
+raw final values. Ranking plots, `compare_interventions_table` and `run_SA` use the same
+definition. `run_GSA` and `sample_outcomes` analyse the outcome itself by default, or the effect
+with `relative_to="baseline"`. The optimizer maximises or minimises the final value and also
+reports `baseline_voi` and `best_effect_vs_baseline`; `max_intensity` caps individual levers.
+
+### Integration settings
+
+Models with custom equations or interaction terms are integrated numerically with
+`sdm.solver = "LSODA"` (default) or any other `scipy.integrate.solve_ivp` method, or with the
+fixed-step methods `"RK4"` and `"Euler"` that system dynamics tools use. Options live in
+`sdm.solver_options`: `rtol`, `atol`, `max_step`, `dt` (fixed-step size) and `max_rhs_evals`
+(200,000 by default). Equations that switch abruptly (e.g. `(S < 0.5)`) can make adaptive
+solvers take ever smaller steps; SIP then stops with an `IntegrationError` that says where it
+stalled, instead of hanging. A fixed-step method handles such models predictably:
+
+```python
+sdm.solver = "RK4"
+sdm.solver_options["dt"] = 0.01
+```
+
+When simulated stock values exceed `sdm.large_value_threshold` (default 10, in absolute value)
+SIP issues one warning per call; set it to `None` for models in absolute units.
 
 ## Development
 
 ```sh
-pip install -e .[dev]
-pytest tests
+pip install -e ".[dev]"
+pytest
 ```
+
+The test suite is described in [tests/README.md](tests/README.md): one acceptance test per
+reported issue, unit tests per module, golden values of the tutorial models, and an optional
+harness that runs private models from a local folder (`SIP_EXTRA_MODELS`). Changes are listed in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Origin and citation
 
