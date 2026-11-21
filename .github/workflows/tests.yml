@@ -15,8 +15,6 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            python-version: "3.9"     # oldest supported version
-          - os: ubuntu-latest
             python-version: "3.12"
           - os: windows-latest
             python-version: "3.12"
@@ -26,6 +24,21 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Install SIP and the test tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e . pytest pytest-timeout
+      - name: Run the test suite
+        run: python -m pytest -ra --timeout=900
+
+  # Oldest supported Python. Current runner images no longer ship 3.9, so use the
+  # official Python image instead of actions/setup-python.
+  pytest-py39:
+    name: Python 3.9 (python:3.9 container)
+    runs-on: ubuntu-latest
+    container: python:3.9
+    steps:
+      - uses: actions/checkout@v4
       - name: Install SIP and the test tools
         run: |
           python -m pip install --upgrade pip
