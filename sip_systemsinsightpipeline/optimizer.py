@@ -18,6 +18,7 @@ Key design choices:
 
 from __future__ import annotations
 
+import functools
 import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
@@ -29,10 +30,21 @@ from scipy.optimize import OptimizeResult
 from scipy.stats import qmc
 from copy import deepcopy
 
+from .sdm import magnitude_watch
+
 try:
     from tqdm import tqdm
 except Exception:  # pragma: no cover
     tqdm = None  # type: ignore
+
+
+def _watched(method):
+    """Report the SDM's large-value notice at most once per optimizer call."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with magnitude_watch(self.sdm):
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 @dataclass
@@ -105,6 +117,7 @@ class SDMOptimizer:
     # ---------------------------------------------------------------------
     # Model execution
     # ---------------------------------------------------------------------
+    @_watched
     def run_SDM_with_intervention_intensities(
         self,
         intervention_intensities: Union[np.ndarray, List[float]],
@@ -233,6 +246,32 @@ class SDMOptimizer:
     # ---------------------------------------------------------------------
     # Optimization
     # ---------------------------------------------------------------------
+    def _baseline_voi(self, params: Dict[str, Any], variable_of_interest: str) -> float:
+        """VOI at the final time with no intervention (NaN if the run fails)."""
+        try:
+            df = self.run_SDM_with_intervention_intensities(
+                np.zeros(len(self.sdm.intervention_variables)), params)
+            return float(df[variable_of_interest].iloc[-1])
+        except Exception:
+            return float("nan")
+
+    @staticmethod
+    def _intensity_caps(max_intensity, n_interventions: int) -> np.ndarray:
+        """Per-lever upper bounds on the intervention intensity (inf = uncapped)."""
+        if max_intensity is None:
+            return np.full(n_interventions, np.inf)
+        caps = np.asarray(max_intensity, dtype=float)
+        if caps.ndim == 0:
+            caps = np.full(n_interventions, float(caps))
+        if caps.shape != (n_interventions,):
+            raise ValueError(f"max_intensity must be a number or have one value per intervention "
+                             f"variable ({n_interventions}), got shape {caps.shape}.")
+        caps = np.where(np.isnan(caps), np.inf, caps)
+        if np.any(caps < 0):
+            raise ValueError("max_intensity values must be >= 0 (use None or inf for no cap).")
+        return caps
+
+    @_watched
     def optimize_intervention_intensities(
         self,
         params: Dict[str, Any],
@@ -241,6 +280,7 @@ class SDMOptimizer:
         *,
         budget: float = 1.0,
         maximize: bool = True,
+        max_intensity: Optional[Union[float, np.ndarray, List[float]]] = None,
         # starts / sampling
         n_starts: Optional[int] = 8,
         seed: Optional[int] = None,
@@ -282,6 +322,11 @@ class SDMOptimizer:
             Total budget for expenditures y (default 1.0).
         maximize : bool
             Whether to maximize or minimize the VOI.
+        max_intensity : float or array-like, optional
+            Upper bound on each lever's intensity (one number for all levers, or one per
+            intervention variable; ``inf``/``NaN`` = no cap). Use it to keep the optimum within
+            the range where the modelled response is plausible; without caps, a lever with a
+            constant marginal effect can absorb the whole budget at an extrapolated size.
         n_starts : int
             Number of multi-start initial points (feasible) for SLSQP. If None, defaults to 30.
         seed : int, optional
@@ -317,8 +362,11 @@ class SDMOptimizer:
             - method: algorithm name
             - success: bool
             - n_equilibria: int
-            - equilibria: list of equilibria dicts
-            - best_effect_size: float
+            - equilibria: list of equilibria dicts (each with ``effect_size`` = VOI value and
+              ``effect_vs_baseline`` = VOI value minus the no-intervention VOI)
+            - best_effect_size: float (the optimised VOI value at the final time)
+            - baseline_voi: float (VOI at the final time without any intervention)
+            - best_effect_vs_baseline: float (``best_effect_size - baseline_voi``)
             - best_intensities: np.ndarray
             - best_y: np.ndarray
             - optimization_result: OptimizeResult (best run)
@@ -363,6 +411,8 @@ class SDMOptimizer:
                 "n_equilibria": 0,
                 "equilibria": [],
                 "best_effect_size": np.nan,
+                "baseline_voi": np.nan,
+                "best_effect_vs_baseline": np.nan,
                 "best_intensities": None,
                 "best_y": None,
                 "optimization_result": None,
@@ -372,6 +422,7 @@ class SDMOptimizer:
 
         costs_array = np.asarray(costs, dtype=float)
         n_interventions = len(self.sdm.intervention_variables)
+        caps = self._intensity_caps(max_intensity, n_interventions)
 
         if costs_array.shape[0] != n_interventions:
             raise ValueError(
@@ -401,10 +452,17 @@ class SDMOptimizer:
         sampler = qmc.Sobol(d=n_interventions + 1, scramble=True, seed=seed)
         u = sampler.random(n=n_draw)
 
+        # Per-lever expenditure caps from the intensity caps (y_i = cost_i * intensity_i)
+        y_upper = np.minimum(float(budget), caps * costs_array)
+
         starts_y = self._sobol_to_simplex_y(u, budget=budget)
+        starts_y = np.minimum(starts_y, y_upper[None, :])  # keep starts within the caps
         # If user requested fewer starts than drawn for Sobol properties, we use all drawn starts.
         # (This keeps Sobol balance and is usually what you want for multistart.)
         n_starts_used = starts_y.shape[0]
+
+        # VOI without any intervention, for reporting effects relative to the baseline
+        baseline_voi = self._baseline_voi(params, variable_of_interest)
 
         # --- Objective + monitoring
         exception_count = 0
@@ -454,8 +512,8 @@ class SDMOptimizer:
         # Constraint: sum(y) <= budget
         budget_constraint = {"type": "ineq", "fun": lambda y: budget - np.sum(y)}
 
-        # Bounds: each y_i in [0, budget]
-        y_bounds = [(0.0, float(budget)) for _ in range(n_interventions)]
+        # Bounds: each y_i in [0, min(budget, cost_i * max_intensity_i)]
+        y_bounds = [(0.0, float(upper)) for upper in y_upper]
 
         # --- Run local optimization from each start
         per_start_results: List[OptimizeResult] = []
@@ -501,6 +559,8 @@ class SDMOptimizer:
                 "n_equilibria": 0,
                 "equilibria": [],
                 "best_effect_size": np.nan,
+                "baseline_voi": baseline_voi,
+                "best_effect_vs_baseline": np.nan,
                 "best_intensities": None,
                 "best_y": None,
                 "optimization_result": None,
@@ -532,7 +592,7 @@ class SDMOptimizer:
         candidates: List[Equilibrium] = []
         for r in valid_results:
             y = np.asarray(r.x, dtype=float)
-            y = np.clip(y, 0.0, float(budget))
+            y = np.clip(y, 0.0, y_upper)
             # enforce sum constraint gently (numerical)
             s = float(np.sum(y))
             if s > budget * (1.0 + constraint_tol):
@@ -588,6 +648,7 @@ class SDMOptimizer:
                     "intensities": eq.intensities.copy(),
                     "y": eq.y.copy(),
                     "effect_size": float(eq.effect_size),
+                    "effect_vs_baseline": float(eq.effect_size) - baseline_voi,
                     "total_cost": float(eq.total_cost),
                     "fun": float(eq.fun),
                 }
@@ -617,6 +678,8 @@ class SDMOptimizer:
             "n_equilibria": len(equilibria_out),
             "equilibria": equilibria_out,
             "best_effect_size": float(best_effect),
+            "baseline_voi": baseline_voi,
+            "best_effect_vs_baseline": float(best_effect) - baseline_voi,
             "best_intensities": (np.asarray(best_res.x, dtype=float) / costs_array),
             "best_y": np.asarray(best_res.x, dtype=float),
             "optimization_result": best_res,
@@ -627,6 +690,7 @@ class SDMOptimizer:
     # ---------------------------------------------------------------------
     # Parameter-sweep optimization
     # ---------------------------------------------------------------------
+    @_watched
     def optimize_across_parameter_samples(
         self,
         costs: Union[np.ndarray, List[float]],
@@ -636,6 +700,7 @@ class SDMOptimizer:
         # optimization parameters forwarded
         budget: float = 1.0,
         maximize: bool = True,
+        max_intensity: Optional[Union[float, np.ndarray, List[float]]] = None,
         n_starts: Optional[int] = None,
         seed: Optional[int] = None,
         sobol_power_of_two: bool = True,
@@ -663,10 +728,14 @@ class SDMOptimizer:
         - sample_idx
         - equilibrium_idx
         - intensity_{intervention_var} (full precision)
-        - voi_effect_size
+        - voi_effect_size (optimised VOI value at the final time)
+        - baseline_voi (VOI without intervention, same parameters)
+        - voi_effect_vs_baseline (voi_effect_size - baseline_voi)
         - total_cost
         - n_equilibria
         - success
+
+        ``max_intensity`` caps each lever's intensity (see :meth:`optimize_intervention_intensities`).
         """
         if variable_of_interest is None:
             variable_of_interest = self.sdm.variable_of_interest[0]
@@ -696,6 +765,7 @@ class SDMOptimizer:
                 variable_of_interest=variable_of_interest,
                 budget=budget,
                 maximize=maximize,
+                max_intensity=max_intensity,
                 n_starts=n_starts,
                 seed=seed,
                 sobol_power_of_two=sobol_power_of_two,
@@ -717,6 +787,8 @@ class SDMOptimizer:
                         "sample_idx": int(sample_idx),
                         "equilibrium_idx": int(eq_idx),
                         "voi_effect_size": float(eq["effect_size"]),
+                        "baseline_voi": float(opt.get("baseline_voi", np.nan)),
+                        "voi_effect_vs_baseline": float(eq.get("effect_vs_baseline", np.nan)),
                         "total_cost": float(eq["total_cost"]),
                         "n_equilibria": int(n_eq),
                         "success": True,
@@ -742,6 +814,8 @@ class SDMOptimizer:
                     "sample_idx": int(sample_idx),
                     "equilibrium_idx": -1,
                     "voi_effect_size": np.nan,
+                    "baseline_voi": float(opt.get("baseline_voi", np.nan)),
+                    "voi_effect_vs_baseline": np.nan,
                     "total_cost": np.nan,
                     "n_equilibria": 0,
                     "success": False,
