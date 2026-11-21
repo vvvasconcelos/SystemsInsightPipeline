@@ -137,3 +137,25 @@ def test_scenario_plots_return_figures():
     fig1 = plot_scenario_tradeoff(res)
     fig2 = plot_scenario_box(res, "x1", "x2", X)
     assert fig1 is not None and fig2 is not None
+
+
+# --------------------------------------------------------------------------- recommended box (I-21)
+
+def test_recommended_box_keeps_default_min_coverage():
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame(rng.uniform(0, 1, size=(2000, 3)), columns=["a", "b", "c"])
+    y = (((X["a"] < 0.5) & (X["b"] < 0.5)) ^ (rng.uniform(size=len(X)) < 0.2)).values
+    res = discover_scenarios(X, y, method="prim")
+    densest = max(res.boxes, key=lambda b: (b.density, b.coverage))
+    assert densest.coverage < 0.5                       # PRIM's last peel: tiny and pure
+    assert res.box.coverage >= 0.5
+    assert res.box is res.select_box(min_coverage=0.5)
+    res.default_min_coverage = 0.0                      # back to "densest box overall"
+    assert res.box is densest
+
+
+def test_recommended_box_falls_back_to_densest_when_no_box_has_coverage():
+    X, y = synthetic()
+    res = discover_scenarios(X, y, method="cart", max_depth=4, min_density=0.8, seed=0)
+    res.default_min_coverage = 1.01
+    assert res.box is max(res.boxes, key=lambda b: (b.density, b.coverage))

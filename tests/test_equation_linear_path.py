@@ -1,14 +1,11 @@
 """Regression guard for the custom-`Equation` column being ignored on the linear SDM path.
 
 A model that defines a node relationship via the Elements `Equation` column but has NO interaction
-terms takes the linear SDM path, which builds A/b from per-link coefficients only and never evaluates
-the equations -> all-zero dynamics, silently.
+terms used to take the linear SDM path, which builds A/b from per-link coefficients only and never
+evaluates the equations -> all-zero dynamics, silently. Fixed in 0.2.x by routing every model with a
+custom equation through the nonlinear path; these tests keep it fixed.
 
-`test_equation_column_drives_linear_dynamics` is marked xfail(strict=True): it documents the intended
-behaviour and is expected to FAIL until the bug is fixed. When the fix lands it will XPASS, and strict
-mode turns an unexpected pass into a failure -- prompting removal of the xfail marker.
-
-Full diagnosis and suggested fix: bug_reports/equation_linear_path.md (+ ..._repro.py, ..._FIX.md).
+Diagnosis of record: bug_reports/equation_linear_path.md (+ ..._repro.py, ..._FIX.md).
 """
 import pandas as pd
 import pytest
