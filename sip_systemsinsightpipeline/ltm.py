@@ -36,9 +36,43 @@ The output is a pandas DataFrame suitable for analysis and visualization of loop
 import numpy as np
 import pandas as pd
 import networkx as nx
-from scipy.integrate import solve_ivp
 from copy import deepcopy
 from tqdm import tqdm
+
+from .sdm import magnitude_watch
+
+
+def find_feedback_loops(df_adj, stocks=None, max_length=None, require_stock=True):
+    """Enumerate the feedback loops of a model in a reproducible, canonical form.
+
+    ``df_adj.loc[target, source] != 0`` marks a link ``source -> target``. Each loop is
+    returned as a list of variable names, rotated to start at the variable that comes first
+    in the model order (the columns of ``df_adj``); loops are sorted by length and then by the
+    model order of their members. The result is therefore identical across Python sessions
+    (it does not depend on string-hash randomisation) and loop names derived from it (R1,
+    B1, ...) are stable.
+
+    Args:
+        df_adj: adjacency DataFrame (index = targets, columns = sources, same order).
+        stocks: stock names; with ``require_stock`` only loops containing a stock are kept.
+        max_length: longest loop to enumerate (None = no limit).
+    """
+    names = list(df_adj.columns)
+    adj_binary = (np.asarray(df_adj, dtype=float).T != 0).astype(int)   # [source, target]
+    graph = nx.from_numpy_array(adj_binary, create_using=nx.DiGraph)     # integer nodes, model order
+    if max_length is None:
+        cycles = nx.simple_cycles(graph)
+    else:
+        cycles = nx.simple_cycles(graph, length_bound=max_length)
+    canonical = set()
+    for cycle in cycles:
+        k = cycle.index(min(cycle))
+        canonical.add(tuple(cycle[k:] + cycle[:k]))
+    loops = [[names[i] for i in cycle] for cycle in sorted(canonical, key=lambda c: (len(c), c))]
+    if require_stock:
+        stock_set = set(stocks or [])
+        loops = [loop for loop in loops if any(var in stock_set for var in loop)]
+    return loops
 
 
 class LoopsThatMatter:
@@ -74,7 +108,8 @@ class LoopsThatMatter:
         self.stocks = sdm.stocks
         self.auxiliaries = sdm.auxiliaries
         self.constants = sdm.constants
-        
+        self.stocks_and_auxiliaries = set(sdm.stocks) | set(sdm.auxiliaries)
+
         # Find all feedback loops in the model
         self.feedback_loops = self._find_feedback_loops()
         self.loop_names = self._name_loops()
@@ -118,30 +153,15 @@ class LoopsThatMatter:
             max_length: Maximum loop length to search for. If None, uses number of stocks + auxiliaries.
         
         Returns:
-            List of loops, where each loop is a list of variable names in order.
+            List of loops, where each loop is a list of variable names in order. Loops (and
+            their starting variable) are in a canonical, reproducible order; see
+            :func:`find_feedback_loops`.
         """
         if max_length is None:
             max_length = len(self.stocks) + len(self.auxiliaries)
-        
-        # Create directed graph from adjacency matrix
-        # Note: df_adj[i,j] != 0 means j influences i, so we need to transpose for nx
-        adj_matrix = np.array(self.df_adj).T
-        adj_binary = (adj_matrix != 0).astype(int)
-        
-        G = nx.from_numpy_array(adj_binary, create_using=nx.DiGraph)
-        var_names = list(self.df_adj.columns)
-        G = nx.relabel_nodes(G, dict(enumerate(var_names)))
-        
-        # Find all simple cycles up to max_length
-        feedback_loops = list(nx.simple_cycles(G, length_bound=max_length))
-        
-        # Filter to only include loops that contain at least one stock
-        loops_with_stocks = []
-        for loop in feedback_loops:
-            if any(var in self.stocks for var in loop):
-                loops_with_stocks.append(loop)
-        
-        return loops_with_stocks
+        # Only loops that contain at least one stock are kept
+        return find_feedback_loops(self.df_adj, stocks=self.stocks, max_length=max_length,
+                                   require_stock=True)
     
     def _name_loops(self):
         """
@@ -214,33 +234,32 @@ class LoopsThatMatter:
             return params[target][source]
         return 0.0
     
-    def _eval_equation(self, target, values, params):
+    def _eval_equation(self, target, values, params, t=0.0):
         """
-        Evaluate a target equation from params (supports custom equations for auxiliaries).
-        Uses SDM's equation evaluator if available and target has a custom equation.
+        Evaluate a target's equation from params: the custom equation of a stock (its rate of
+        change) or auxiliary when it has one, otherwise the linear combination in ``params``.
+        Uses the SDM's equation evaluator, exactly as the simulation does.
 
         Expected custom equation parameter format (enforced):
             params[target][f'__eq_params_{target}__'] = {'#1': val1, '#2': val2, ...}
-        Any other format will raise a ValueError.
+        A missing entry is treated as "no parameters"; any other format raises a ValueError.
         """
-        # Use SDM's equation evaluator for auxiliaries with custom equations
+        # Use SDM's equation evaluator for stocks and auxiliaries with custom equations
         if (
-            hasattr(self.sdm, '_equation_evaluator')
-            and self.sdm._equation_evaluator is not None
-            and target in self.sdm.auxiliaries
+            target in self.stocks_and_auxiliaries
+            and getattr(self.sdm, '_equation_evaluator', None) is not None
             and self.sdm._equation_evaluator.has_custom_equation(target)
         ):
             eq_params_full = params.get(target, {})
             eq_key = f'__eq_params_{target}__'
-            if eq_key in eq_params_full and isinstance(eq_params_full[eq_key], dict):
-                eq_params = eq_params_full[eq_key]
-            else:
+            eq_params = eq_params_full.get(eq_key, {}) if isinstance(eq_params_full, dict) else None
+            if not isinstance(eq_params, dict):
                 raise ValueError(
                     f"Custom equation parameters for '{target}' must be provided as a nested dict under key '{eq_key}'. "
-                    f"Found: {type(eq_params_full.get(eq_key))} (keys: {list(eq_params_full.keys()) if isinstance(eq_params_full, dict) else eq_params_full})"
+                    f"Found: {type(eq_params)} (keys: {list(eq_params_full.keys()) if isinstance(eq_params_full, dict) else eq_params_full})"
                 )
             # Use 0.0 for intervention (no effect in LTM ceteris paribus)
-            return self.sdm._equation_evaluator.evaluate(target, values, eq_params, intervention=0.0)
+            return self.sdm._equation_evaluator.evaluate(target, values, eq_params, intervention=0.0, t=t)
         # Otherwise, use linear logic (stocks, constants, or auxiliaries without custom eq)
         eq = params.get(target, {})
         total = float(eq.get("Intercept", 0.0))
@@ -258,33 +277,34 @@ class LoopsThatMatter:
                 total += float(coef) * float(values.get(term, 0.0))
         return total
     
-    def _delta_z_ceteris(self, target, source, curr_vals, prev_vals, params):
+    def _delta_z_ceteris(self, target, source, curr_vals, prev_vals, params, t_prev=0.0):
         """
         Compute ceteris paribus Δz_x by evaluating with mixed values.
-        
+
         Δz_x = f(x_t, others_{t-1}) - f(x_{t-1}, others_{t-1})
-        
+
         Both baseline and ceteris are computed by evaluating the same equation
-        function (including intercept and interactions).
-        
+        function (including intercept and interactions). Time itself is held at t-1.
+
         Args:
             target: Target variable name
             source: Source variable name (the one that changes)
             curr_vals: Dict of variable values at current time
             prev_vals: Dict of variable values at previous time
             params: Parameter dictionary
-        
+            t_prev: the previous time (used by equations that reference ``t``)
+
         Returns:
             Ceteris paribus change Δz_x
         """
         # Baseline: all inputs at t-1
-        z_base = self._eval_equation(target, prev_vals, params)
-        
+        z_base = self._eval_equation(target, prev_vals, params, t_prev)
+
         # Ceteris paribus: source at t, all others at t-1
         mixed = dict(prev_vals)
         mixed[source] = curr_vals.get(source, mixed.get(source, 0.0))
-        z_cet = self._eval_equation(target, mixed, params)
-        
+        z_cet = self._eval_equation(target, mixed, params, t_prev)
+
         return z_cet - z_base
     
     def _active_links_from_params(self, params):
@@ -421,8 +441,8 @@ class LoopsThatMatter:
             stock_rhs_curr = {}
             stock_rhs_prev = {}
             for stock in self.stocks:
-                stock_rhs_curr[stock] = self._eval_equation(stock, var_values_curr, params)
-                stock_rhs_prev[stock] = self._eval_equation(stock, var_values_prev, params)
+                stock_rhs_curr[stock] = self._eval_equation(stock, var_values_curr, params, t)
+                stock_rhs_prev[stock] = self._eval_equation(stock, var_values_prev, params, t_prev)
             
             # Compute LTM link scores for each link
             time_ltm_scores = {}
@@ -438,7 +458,7 @@ class LoopsThatMatter:
                 structural_polarity = structural_polarities[(source, target)]
                 
                 # Compute ceteris paribus change (consistent for both stocks and auxiliaries)
-                delta_z_x = self._delta_z_ceteris(target, source, var_values_curr, var_values_prev, params)
+                delta_z_x = self._delta_z_ceteris(target, source, var_values_curr, var_values_prev, params, t_prev)
                 
                 if is_stock_target:
                     # For stocks: use |Δz_x| / |Δnet_flow| for magnitude
@@ -661,7 +681,20 @@ class LoopsThatMatter:
         # Set new t_eval for detailed time points
         self.sdm.t_eval = t_eval
         self.sdm.t_span = [t_start, t_end]
-        
+
+        with magnitude_watch(self.sdm):
+            df_sol = self._simulate_for_ltm(params, intervention_intensities, intervention_variable,
+                                            original_t_eval, original_t_span)
+
+        # Compute link and loop scores
+        link_scores_df = self.compute_link_scores(df_sol, params, t_eval)
+        loop_scores_df = self.compute_loop_scores()
+
+        return df_sol, link_scores_df, loop_scores_df
+
+    def _simulate_for_ltm(self, params, intervention_intensities, intervention_variable,
+                          original_t_eval, original_t_span):
+        """Simulate on the LTM time grid (already set on the SDM), then restore its grid."""
         try:
             # Handle intervention intensities
             if intervention_intensities is not None:
@@ -691,18 +724,19 @@ class LoopsThatMatter:
                 else:
                     A, b = self.sdm.params_to_A_b(params, constants_values)
 
-                df_sol = self.sdm.run_SDM(x0, constants_values, A, b, params)
+                # No intervention may leak in from an earlier simulation's state
+                previous = getattr(self.sdm, "_current_intervention_intensities", None)
+                self.sdm._current_intervention_intensities = {}
+                try:
+                    df_sol = self.sdm.run_SDM(x0, constants_values, A, b, params)
+                finally:
+                    self.sdm._current_intervention_intensities = previous if previous is not None else {}
         finally:
             # Restore original t_eval and t_span
             self.sdm.t_eval = original_t_eval
             self.sdm.t_span = original_t_span
-        
-        # Compute link and loop scores
-        link_scores_df = self.compute_link_scores(df_sol, params, t_eval)
-        loop_scores_df = self.compute_loop_scores()
-        
-        return df_sol, link_scores_df, loop_scores_df
-    
+        return df_sol
+
     def run_ltm_across_samples(self, n_samples=None, t_start=0, t_end=None, n_points=50,
                                 intervention_intensities=None, intervention_variable=None):
         """
@@ -728,27 +762,28 @@ class LoopsThatMatter:
             n_samples = self.sdm.N
         
         all_loop_scores = []
-        
-        for sample_idx in tqdm(range(n_samples), desc="Running LTM across samples"):
-            # Sample parameters
-            params = self.sdm.sample_model_parameters()
-            
-            try:
-                # Run LTM analysis with intervention
-                _, _, loop_scores_df = self.run_ltm_analysis(
-                    params, t_start, t_end, n_points, 
-                    intervention_intensities=intervention_intensities,
-                    intervention_variable=intervention_variable,
-                    progress_bar=False
-                )
-                
-                # Add sample index
-                loop_scores_df['sample_idx'] = sample_idx
-                all_loop_scores.append(loop_scores_df)
-                
-            except Exception as e:
-                print(f"Sample {sample_idx} failed: {e}")
-                continue
+
+        with magnitude_watch(self.sdm):
+            for sample_idx in tqdm(range(n_samples), desc="Running LTM across samples"):
+                # Sample parameters
+                params = self.sdm.sample_model_parameters()
+
+                try:
+                    # Run LTM analysis with intervention
+                    _, _, loop_scores_df = self.run_ltm_analysis(
+                        params, t_start, t_end, n_points,
+                        intervention_intensities=intervention_intensities,
+                        intervention_variable=intervention_variable,
+                        progress_bar=False
+                    )
+
+                    # Add sample index
+                    loop_scores_df['sample_idx'] = sample_idx
+                    all_loop_scores.append(loop_scores_df)
+
+                except Exception as e:
+                    print(f"Sample {sample_idx} failed: {e}")
+                    continue
         
         # Combine all results
         if all_loop_scores:
