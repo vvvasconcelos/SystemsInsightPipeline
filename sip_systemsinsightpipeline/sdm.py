@@ -1,11 +1,63 @@
+import contextlib
+import os
+import sys
 import warnings
 import numpy as np
 import pandas as pd
 from scipy.integrate import solve_ivp
 import scipy
+import scipy.linalg
+import scipy.stats
 from copy import deepcopy
-from tqdm import tqdm 
+from tqdm import tqdm
 from tabulate import tabulate
+
+
+class IntegrationError(RuntimeError):
+    """The ODE integration failed, or used more right-hand-side evaluations than allowed."""
+
+
+#: Default integration settings (copied to ``SDM.solver_options``):
+#:
+#: - ``rtol``, ``atol``: tolerances of the adaptive ``scipy.integrate.solve_ivp`` methods;
+#: - ``max_step``: largest step of the adaptive methods (``inf`` = no limit);
+#: - ``dt``: step of the fixed-step methods ``"RK4"``/``"Euler"`` (``None`` = horizon / 1000);
+#: - ``max_rhs_evals``: budget of right-hand-side evaluations per simulation for the adaptive
+#:   methods. Exceeding it raises :class:`IntegrationError` instead of hanging (discontinuous
+#:   equations can make the step size collapse). ``None`` disables the guard.
+DEFAULT_SOLVER_OPTIONS = {
+    "rtol": 1e-6,
+    "atol": 1e-6,
+    "max_step": np.inf,
+    "dt": None,
+    "max_rhs_evals": 200_000,
+}
+FIXED_STEP_METHODS = ("RK4", "EULER")
+
+
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+_HELPER_FILES = {os.path.abspath(contextlib.__file__)}
+
+
+def _user_stacklevel():
+    """``stacklevel`` for ``warnings.warn`` that points at the first frame outside SIP."""
+    frame, level = sys._getframe(2), 2   # frame 1 is the function calling warnings.warn
+    while frame is not None:
+        filename = os.path.abspath(frame.f_code.co_filename)
+        if not (filename.startswith(_PACKAGE_DIR) or filename in _HELPER_FILES):
+            break
+        frame, level = frame.f_back, level + 1
+    return level
+
+
+def magnitude_watch(sdm):
+    """Context manager that collects the large-value notice of ``sdm`` and reports it once.
+
+    Works with any object; it is a no-op for objects that are not an :class:`SDM`.
+    """
+    watch = getattr(sdm, "_magnitude_watch", None)
+    return watch() if watch is not None else contextlib.nullcontext()
+
 
 class SDM:
     def __init__(self, s):
@@ -31,7 +83,7 @@ class SDM:
         self.intervention_strengths = s.intervention_strengths
         self.auxiliaries_sorted = []  # To store the sorted auxiliaries based on dependencies
         np.random.seed(s.seed)  # Set seed for reproducibility
-        
+
         # Track current intervention intensities during simulation
         self._current_intervention_intensities = {}  # var -> intensity
 
@@ -43,19 +95,34 @@ class SDM:
             from .equations import EquationEvaluator
             # Use parameter_value_aux as the default range for custom equation parameters
             self._equation_evaluator = EquationEvaluator(
-                self.equations, 
+                self.equations,
                 parameter_range=(0, s.parameter_value_aux)
             )
             # Print warnings if any
             for warning in self.equation_warnings:
                 print(f"Warning: {warning}")
 
+        # Variables whose value (auxiliary) or rate of change (stock) is a custom equation.
+        self._eq_vars = {var for var in self.equations
+                         if self._equation_evaluator and self._equation_evaluator.has_custom_equation(var)}
+        self._eq_param_keys = {var: f'__eq_params_{var}__' for var in self.variables}
+
         # Models with any valid custom equation must be integrated through the nonlinear
         # ODE path (dz_dt_int -> _compute_equation_value), even with no interaction terms,
         # otherwise the linear A/b shortcut silently ignores the equations.
-        self._uses_equations = bool(self._equation_evaluator) and any(
-            self._equation_evaluator.has_custom_equation(var) for var in self.equations
-        )
+        self._uses_equations = bool(self._eq_vars)
+
+        # Named parameters (#name): one value per draw, shared by every equation using it.
+        # Their ranges come from the workbook's Parameters sheet (s.parameter_priors) and
+        # default to [0, parameter_value_aux].
+        self.parameter_priors = dict(getattr(s, 'parameter_priors', {}) or {})
+        named_users = {}
+        for var in self.stocks_and_auxiliaries:
+            if var in self._eq_vars:
+                for name in self.equations[var].get('named_parameters', []):
+                    named_users.setdefault(name, []).append(var)
+        self._named_param_users = named_users
+        self.named_parameters = sorted(named_users)
 
         self.num_pars_stocks = int((self.df_adj.loc[self.stocks, :] != 0).sum().sum())
         self.num_pars_auxiliaries = int((self.df_adj.loc[self.auxiliaries, :] != 0).sum().sum())
@@ -66,37 +133,47 @@ class SDM:
         self.num_pars_int_stocks = int(np.count_nonzero(self.interactions_matrix[np.ix_(stock_indices,
                                             np.arange(self.interactions_matrix.shape[1]),
                                             np.arange(self.interactions_matrix.shape[2]))]))
-        
+
         self.num_pars_int_auxiliaries = int(np.count_nonzero(self.interactions_matrix[np.ix_(aux_indices,
                                             np.arange(self.interactions_matrix.shape[1]),
                                             np.arange(self.interactions_matrix.shape[2]))]))
 
-        # Set the SDM simulation timesteps to store 
-        self.solver = 'LSODA'  # 'LSODA' automatically switches between stiff and non-stiff methods since stiffness is not always known.
-        self.t_span = [0.0, s.t_end] 
-        self.t_eval = np.array(self.t_span)  # Only evaluate final time point for analytical solution
+        # Integration settings. ``solver`` is any scipy.integrate.solve_ivp method ('LSODA'
+        # switches automatically between stiff and non-stiff methods since stiffness is not
+        # always known) or a fixed-step method ('RK4', 'Euler'); see DEFAULT_SOLVER_OPTIONS.
+        self.solver = 'LSODA'
+        self.solver_options = dict(DEFAULT_SOLVER_OPTIONS)
+        self.t_span = [0.0, s.t_end]
+        self.t_eval = np.array(self.t_span)  # Only evaluate final time point by default
+
+        # Notice when simulated stock values become large (|x| > threshold), reported at most
+        # once per top-level call. Set to None to disable (e.g. for models in absolute units).
+        self.large_value_threshold = 10.0
+        self._magnitude_depth = 0
+        self._max_abs_stock_value = 0.0
 
     def flatten(self, xss):
         return [x for xs in xss for x in xs]
-    
+
     # =========================================================================
     # Backward-compatible optimization methods (delegate to SDMOptimizer)
     # For new code, prefer using SDMOptimizer directly:
     #   from sip_systemsinsightpipeline.optimizer import SDMOptimizer
     #   optimizer = SDMOptimizer(sdm)
     # =========================================================================
-    
+
     def _get_optimizer(self):
         """Lazily create and cache an SDMOptimizer instance."""
         if not hasattr(self, '_optimizer'):
             from .optimizer import SDMOptimizer
             self._optimizer = SDMOptimizer(self)
         return self._optimizer
-    
+
     def run_SDM_with_intervention_intensities(self, intervention_intensities, params):
         """Run the SDM with intervention intensities. See SDMOptimizer for full documentation."""
-        return self._get_optimizer().run_SDM_with_intervention_intensities(intervention_intensities, params)
-    
+        with self._magnitude_watch():
+            return self._get_optimizer().run_SDM_with_intervention_intensities(intervention_intensities, params)
+
     def optimize_intervention_intensities(self, params, costs, variable_of_interest=None, **kwargs):
         """Optimize intervention expenditures under a budget. See SDMOptimizer for full documentation."""
         return self._get_optimizer().optimize_intervention_intensities(
@@ -109,113 +186,176 @@ class SDM:
             costs, variable_of_interest, **kwargs
         )
 
+    # =========================================================================
+    # Large-value notice (reported once per top-level call)
+    # =========================================================================
+
+    @contextlib.contextmanager
+    def _magnitude_watch(self):
+        if self._magnitude_depth == 0:
+            self._max_abs_stock_value = 0.0
+        self._magnitude_depth += 1
+        try:
+            yield
+        finally:
+            self._magnitude_depth -= 1
+            if self._magnitude_depth == 0:
+                self._emit_large_value_notice()
+
+    def _note_magnitude(self, solution):
+        solution = np.asarray(solution, dtype=float)
+        finite = solution[np.isfinite(solution)]
+        if finite.size:
+            self._max_abs_stock_value = max(self._max_abs_stock_value, float(np.max(np.abs(finite))))
+        if self._magnitude_depth == 0:  # a direct run_SDM call is its own top-level call
+            self._emit_large_value_notice()
+
+    def _emit_large_value_notice(self):
+        largest, self._max_abs_stock_value = self._max_abs_stock_value, 0.0
+        threshold = self.large_value_threshold
+        if threshold is not None and largest > threshold:
+            warnings.warn(
+                f"Simulated stock values reached |x| = {largest:.3g}, larger than {threshold:g} "
+                "(sdm.large_value_threshold). In normalised models this suggests that the sampled "
+                "parameter ranges (parameter_value_stocks, parameter_value_aux) are too large; for "
+                "models in absolute units raise the threshold or set it to None.",
+                UserWarning, stacklevel=_user_stacklevel())
+
+    @contextlib.contextmanager
+    def _preserve_intervention_state(self):
+        previous = self._current_intervention_intensities
+        try:
+            yield
+        finally:
+            self._current_intervention_intensities = previous if previous is not None else {}
+
+    # =========================================================================
+    # Simulation
+    # =========================================================================
+
     def run_simulations(self):
-        """ Run the simulations for N iterations for all the specified interventions
-        (PATCHED: remove link parameters for variables with custom equations as early as possible) """
+        """Simulate every intervention for N parameter samples.
+
+        For each parameter sample the model is simulated once without any intervention (the
+        *baseline*, stored in ``self.df_sol_baseline_per_sample``) and once per intervention
+        variable (``self.df_sol_per_sample[n][i]``). Link parameters of variables with a custom
+        equation are removed right after sampling, because the equation replaces the linear
+        combination of incoming links.
+
+        Returns ``(df_sol_per_sample, param_samples)``.
+        """
         df_sol_per_sample = []  # List for storing the solution dataframes
-        param_samples = {var: {} for var in self.intervention_variables}  # Dictionary for storing the parameters across samples
+        df_sol_baseline_per_sample = []
+        param_samples = {var: {} for var in self.intervention_variables}  # Parameters across samples
 
-        for num in tqdm(range(self.N), desc="Running Simulations"):  # Iterate over the number of samples
-            df_sol = []
+        with self._magnitude_watch(), self._preserve_intervention_state():
+            for num in tqdm(range(self.N), desc="Running Simulations"):  # Iterate over the number of samples
+                df_sol = []
 
-            params_i = self.sample_model_parameters()  # Sample model parameters
+                params_i = self.sample_model_parameters()  # Sample model parameters
 
-            # PATCH: Remove link parameters for variables with custom equations IMMEDIATELY after sampling
-            if self._equation_evaluator:
-                for var in params_i:
-                    if self._equation_evaluator.has_custom_equation(var):
-                        eq_keys = [k for k in params_i[var] if k.startswith('__eq_params_') or k == 'Intercept']
-                        params_i[var] = {k: params_i[var][k] for k in eq_keys}
+                # Remove link parameters for variables with custom equations right after sampling
+                if self._equation_evaluator:
+                    for var in params_i:
+                        if self._equation_evaluator.has_custom_equation(var):
+                            eq_keys = [k for k in params_i[var] if k.startswith('__eq_params_') or k == 'Intercept']
+                            params_i[var] = {k: params_i[var][k] for k in eq_keys}
 
-            params_filtered = deepcopy(params_i)
+                params_filtered = deepcopy(params_i)
 
-            for i, var in enumerate(self.intervention_variables):
-                # Set the initial condition for the stocks to zero
-                x0 = np.zeros(len(self.stocks), dtype=np.float64)  # By default no intervention on a stock or constant
-                constants_values = np.zeros(len(self.constants), dtype=np.float64)  # By default no intervention on a constant
+                # No-intervention baseline with the same parameters (effects are measured against it)
+                df_sol_baseline_per_sample.append(self._run_baseline(params_filtered))
 
-                params = deepcopy(params_filtered)  # Use filtered parameters
+                for i, var in enumerate(self.intervention_variables):
+                    # Set the initial condition for the stocks to zero
+                    x0 = np.zeros(len(self.stocks), dtype=np.float64)  # By default no intervention on a stock or constant
+                    constants_values = np.zeros(len(self.constants), dtype=np.float64)  # By default no intervention on a constant
 
-                # Reset current intervention intensities
-                self._current_intervention_intensities = {}
+                    params = deepcopy(params_filtered)  # Use filtered parameters
 
-                if '+' not in var:  # Single factor intervention
-                    if var in self.stocks:
-                        x0[self.stocks.index(var)] += self.intervention_strengths[var]
-                    elif var in self.constants:
-                        constants_values[self.constants.index(var)] += self.intervention_strengths[var]
+                    # Reset current intervention intensities
+                    self._current_intervention_intensities = {}
+
+                    if '+' not in var:  # Single factor intervention
+                        if var in self.stocks:
+                            x0[self.stocks.index(var)] += self.intervention_strengths[var]
+                        elif var in self.constants:
+                            constants_values[self.constants.index(var)] += self.intervention_strengths[var]
+                        else:
+                            # Track intervention intensity for custom equations
+                            self._current_intervention_intensities[var] = self.intervention_strengths[var]
+                            # Only set intercept if no custom equation (custom equation handles $ itself)
+                            if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var)):
+                                params[var]["Intercept"] = self.intervention_strengths[var]
+
+                    else:  # Double factor intervention
+                        var_1, var_2 = var.split('+')
+                        if var_1 in self.stocks:
+                            x0[self.stocks.index(var_1)] += (1/2) * self.intervention_strengths[var_1]
+                        elif var_1 in self.constants:
+                            constants_values[self.constants.index(var_1)] += (1/2) * self.intervention_strengths[var_1]
+                        else:
+                            self._current_intervention_intensities[var_1] = (1/2) * self.intervention_strengths[var_1]
+                            if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var_1)):
+                                params[var_1]["Intercept"] = (1/2) * self.intervention_strengths[var_1]
+
+                        if var_2 in self.stocks:
+                            x0[self.stocks.index(var_2)] += (1/2) * self.intervention_strengths[var_2]
+                        elif var_2 in self.constants:
+                            constants_values[self.constants.index(var_2)] += (1/2) * self.intervention_strengths[var_2]
+                        else:
+                            self._current_intervention_intensities[var_2] = (1/2) * self.intervention_strengths[var_2]
+                            if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var_2)):
+                                params[var_2]["Intercept"] = (1/2) * self.intervention_strengths[var_2]
+
+                    if self.interaction_terms or self._uses_equations:
+                        A = None
+                        b = None
+                    else:  # Get the system matrices A and b
+                        A, b = self.params_to_A_b(params, constants_values)
+
+                    df_sol_per_intervention = self.run_SDM(x0, constants_values, A, b, params)
+                    df_sol += [df_sol_per_intervention]
+
+                    # Store the model parameters
+                    if num == 0:
+                        param_samples[var] = {target: {source: [params[target][source]] for source in params[target]} for target in params}
                     else:
-                        # Track intervention intensity for custom equations
-                        self._current_intervention_intensities[var] = self.intervention_strengths[var]
-                        # Only set intercept if no custom equation (custom equation handles $ itself)
-                        if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var)):
-                            params[var]["Intercept"] = self.intervention_strengths[var]
+                        for target in params:
+                            for source in params[target]:
+                                param_samples[var][target][source] += [params[target][source]]
 
-                else:  # Double factor intervention
-                    var_1, var_2 = var.split('+')
-                    if var_1 in self.stocks:
-                        x0[self.stocks.index(var_1)] += (1/2) * self.intervention_strengths[var_1]
-                    elif var_1 in self.constants:
-                        constants_values[self.constants.index(var_1)] += (1/2) * self.intervention_strengths[var_1]
-                    else:
-                        self._current_intervention_intensities[var_1] = (1/2) * self.intervention_strengths[var_1]
-                        if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var_1)):
-                            params[var_1]["Intercept"] = (1/2) * self.intervention_strengths[var_1]
-
-                    if var_2 in self.stocks:
-                        x0[self.stocks.index(var_2)] += (1/2) * self.intervention_strengths[var_2]
-                    elif var_2 in self.constants:
-                        constants_values[self.constants.index(var_2)] += (1/2) * self.intervention_strengths[var_2]
-                    else:
-                        self._current_intervention_intensities[var_2] = (1/2) * self.intervention_strengths[var_2]
-                        if not (self._equation_evaluator and self._equation_evaluator.has_custom_equation(var_2)):
-                            params[var_2]["Intercept"] = (1/2) * self.intervention_strengths[var_2]
-
-                if self.interaction_terms or self._uses_equations:
-                    #K = self.params_to_K(params)
-                    A = None
-                    b = None
-                else:  # Get the system matrices A and b
-                    A, b = self.params_to_A_b(params, constants_values)
-
-                df_sol_per_intervention = self.run_SDM(x0, constants_values, A, b, params)
-                df_sol += [df_sol_per_intervention]
-
-                # Store the model parameters
-                if num == 0:
-                    param_samples[var] = {target: {source: [params[target][source]] for source in params[target]} for target in params}
-                else:
-                    for target in params:
-                        for source in params[target]:
-                            param_samples[var][target][source] += [params[target][source]]
-
-            df_sol_per_sample += [df_sol]
+                df_sol_per_sample += [df_sol]
 
         self.df_sol_per_sample = df_sol_per_sample
+        self.df_sol_baseline_per_sample = df_sol_baseline_per_sample
         self.param_samples = param_samples
         return df_sol_per_sample, param_samples
+
+    def _run_baseline(self, params):
+        """Simulate the model without any intervention for the given parameters."""
+        x0 = np.zeros(len(self.stocks), dtype=np.float64)
+        constants_values = np.zeros(len(self.constants), dtype=np.float64)
+        with self._preserve_intervention_state():
+            self._current_intervention_intensities = {}
+            if self.interaction_terms or self._uses_equations:
+                A, b = None, None
+            else:
+                A, b = self.params_to_A_b(params, constants_values)
+            return self.run_SDM(x0, constants_values, A, b, params)
 
     def run_SDM(self, x0, constants_values, A, b, params):
         """ Run the SDM and return a dataframe with all the variables at every time step, including auxiliaries.
         """
         if self.interaction_terms or self._uses_equations:
-            solution = solve_ivp(self.dz_dt_int, self.t_span, x0, args=(constants_values, params),
-                                 t_eval=self.t_eval, method=self.solver, rtol=1e-6, atol=1e-6).y.T
+            solution = self._integrate(self.dz_dt_int, x0, (constants_values, params))
         else:  # Linear system
-            # Guard against silent regression: custom equations are only honoured on the
-            # nonlinear path above, so they must never reach the linear A/b solver.
-            if self._uses_equations:
-                warnings.warn("Custom equations are present but the linear SDM path was taken; "
-                              "the equations would be ignored. This indicates a routing bug.")
             if self.solve_analytically:
                 solution = self.analytical_solution(self.t_eval[:, None], x0, A, b)
             else:
-                solution = solve_ivp(self.solve_sdm_linear, self.t_span, x0, args=(A, b),
-                                   t_eval=self.t_eval, jac=self.jac_linear,
-                                   method=self.solver, rtol=1e-6, atol=1e-6).y.T
+                solution = self._integrate(self.solve_sdm_linear, x0, (A, b), jac=self.jac_linear)
 
-        if np.sum(solution > 10):
-            print("Warning: Solution has values larger than 10. The maximum parameter values may be too large.")
+        self._note_magnitude(solution)
 
         df_sol = pd.DataFrame(solution, columns=self.stocks, index=self.t_eval)
         df_sol["Time"] = df_sol.index
@@ -228,47 +368,139 @@ class SDM:
         params_aux_only = {var : params[var] for var in self.auxiliaries}
         df_sol_with_aux = self.evaluate_auxiliaries(params_aux_only, df_sol)
         return df_sol_with_aux
-    
+
+    # -------------------------------------------------------------------------
+    # Integration
+    # -------------------------------------------------------------------------
+
+    def _solver_settings(self):
+        opts = dict(DEFAULT_SOLVER_OPTIONS)
+        opts.update(self.solver_options or {})
+        unknown = set(opts) - set(DEFAULT_SOLVER_OPTIONS)
+        if unknown:
+            raise ValueError(f"Unknown solver option(s) {sorted(unknown)}; valid options are "
+                             f"{sorted(DEFAULT_SOLVER_OPTIONS)}.")
+        return opts
+
+    def _integrate(self, fun, x0, args, jac=None):
+        """Integrate ``dx/dt = fun(t, x, *args)`` over ``self.t_span``; return values at ``self.t_eval``.
+
+        Uses ``self.solver`` and ``self.solver_options`` (see ``DEFAULT_SOLVER_OPTIONS``).
+        Raises :class:`IntegrationError` if the solver fails or exceeds ``max_rhs_evals``.
+        """
+        method = str(self.solver)
+        opts = self._solver_settings()
+        if method.upper() in FIXED_STEP_METHODS:
+            return self._integrate_fixed_step(fun, x0, args, method.upper(), opts["dt"])
+
+        t0, t1 = float(self.t_span[0]), float(self.t_span[1])
+        budget = opts["max_rhs_evals"]
+        state = {"n": 0, "t": t0}
+
+        def rhs(t, y, *a):
+            state["n"] += 1
+            if t > state["t"]:
+                state["t"] = t
+            if budget is not None and state["n"] > budget:
+                raise IntegrationError(
+                    f"The ODE solver ({method}) did not finish: it used more than {int(budget):,} "
+                    f"right-hand-side evaluations and stalled near t = {state['t']:.6g} (of {t1:g}). "
+                    "This usually means a discontinuous equation (a switch such as (S < 0.5)) makes "
+                    "the adaptive step size collapse. Options: a fixed-step method "
+                    "(sdm.solver = 'RK4' with sdm.solver_options['dt']), sdm.solver = 'BDF', or a "
+                    "larger sdm.solver_options['max_rhs_evals'] (None disables this guard).")
+            return fun(t, y, *a)
+
+        kwargs = dict(t_eval=self.t_eval, method=method, rtol=opts["rtol"], atol=opts["atol"], args=args)
+        if opts["max_step"] is not None and np.isfinite(opts["max_step"]):
+            kwargs["max_step"] = float(opts["max_step"])
+        if jac is not None and method in ("LSODA", "BDF", "Radau"):
+            kwargs["jac"] = jac
+        sol = solve_ivp(rhs, self.t_span, x0, **kwargs)
+        if not sol.success or sol.y.shape[1] != len(self.t_eval):
+            reached = sol.t[-1] if len(sol.t) else t0
+            raise IntegrationError(f"The ODE solver ({method}) failed at t = {reached:.6g} (of {t1:g}): "
+                                   f"{sol.message}")
+        return sol.y.T
+
+    def _integrate_fixed_step(self, fun, x0, args, method, dt):
+        """Classical fixed-step integration ('RK4' or 'EULER').
+
+        Every recorded time in ``self.t_eval`` is hit exactly: each interval between recorded
+        times is split into equal sub-steps no longer than ``dt``.
+        """
+        t_eval = np.asarray(self.t_eval, dtype=float)
+        t0, t1 = float(self.t_span[0]), float(self.t_span[1])
+        if dt is None:
+            dt = (t1 - t0) / 1000.0
+        dt = float(dt)
+        if not dt > 0:
+            raise ValueError("solver_options['dt'] must be positive.")
+        if t_eval.size and (t_eval[0] < t0 - 1e-12 or np.any(np.diff(t_eval) < 0)):
+            raise ValueError("t_eval must be increasing and start at or after t_span[0] for fixed-step solvers.")
+
+        x = np.array(x0, dtype=float)
+        t = t0
+        out = np.empty((t_eval.size, x.size), dtype=float)
+        for k, t_rec in enumerate(t_eval):
+            span = t_rec - t
+            if span > 0:
+                n_sub = max(1, int(np.ceil(span / dt - 1e-9)))
+                h = span / n_sub
+                for j in range(n_sub):
+                    tj = t + j * h
+                    if method == "EULER":
+                        x = x + h * np.asarray(fun(tj, x, *args), dtype=float)
+                    else:
+                        k1 = np.asarray(fun(tj, x, *args), dtype=float)
+                        k2 = np.asarray(fun(tj + h / 2, x + (h / 2) * k1, *args), dtype=float)
+                        k3 = np.asarray(fun(tj + h / 2, x + (h / 2) * k2, *args), dtype=float)
+                        k4 = np.asarray(fun(tj + h, x + h * k3, *args), dtype=float)
+                        x = x + (h / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+                t = t_rec
+            out[k] = x
+        return out
+
     def dz_dt_int(self, t, z, constants_values, params):
-        """Compute dz/dt for nonlinear SDM with interaction terms using only NumPy."""
+        """Compute dz/dt for the nonlinear SDM (interaction terms and/or custom equations)."""
         # Compute all variable values (stocks, constants, auxiliaries)
-        vals = self._compute_all_auxiliaries(z, constants_values, params)
+        vals = self._compute_all_auxiliaries(z, constants_values, params, t)
 
         # Compute stock derivatives using shared equation evaluation
         dz = np.zeros(len(self.stocks))
         for i, stock in enumerate(self.stocks):
-            dz[i] = self._compute_equation_value(stock, params, vals)
+            dz[i] = self._compute_equation_value(stock, params, vals, t)
         return dz
 
-    def _compute_equation_value(self, var, params, vals):
+    def _compute_equation_value(self, var, params, vals, t=0.0):
         """
         Compute the value of any equation (auxiliary value or stock derivative).
-        
+
         This is the single source of truth for equation evaluation,
         used by dz_dt_int (during ODE integration) for both auxiliaries and
         stock derivatives, and by evaluate_auxiliaries (for post-simulation output).
-        
+
         If a custom equation is defined for the variable (from the Equation column
         in the Kumu Excel file), that equation will be used instead of the default
         linear combination.
-        
+
         Args:
             var: Name of the variable (auxiliary or stock)
             params: Parameter dictionary with coefficients (also contains equation parameters)
             vals: Dictionary of current variable values (stocks, constants, and already-computed auxiliaries)
-        
+            t: simulation time (available to custom equations as ``t``)
+
         Returns:
             float: Computed equation value
         """
         # Check if this variable has a custom equation
-        if self._equation_evaluator and self._equation_evaluator.has_custom_equation(var):
+        if var in self._eq_vars:
             # Get the sampled parameters for this equation from params[var] dict
-            eq_params_key = f'__eq_params_{var}__'
-            eq_params = params[var].get(eq_params_key, np.array([]))
+            eq_params = params[var].get(self._eq_param_keys[var], {})
             # Get intervention intensity for this variable (default 0.0 if not intervened)
             intervention = self._current_intervention_intensities.get(var, 0.0)
-            return self._equation_evaluator.evaluate(var, vals, eq_params, intervention)
-        
+            return self._equation_evaluator.evaluate(var, vals, eq_params, intervention, t)
+
         # Default: linear combination based on adjacency matrix
         total = 0.0
         for pred, coef in params[var].items():
@@ -288,15 +520,16 @@ class SDM:
                 total += coef * vals[pred]
         return total
 
-    def _compute_all_auxiliaries(self, stock_vals, const_vals, params):
+    def _compute_all_auxiliaries(self, stock_vals, const_vals, params, t=0.0):
         """
         Compute all auxiliary values given stock and constant values.
-        
+
         Args:
             stock_vals: Array or list of stock values (in order of self.stocks)
             const_vals: Array or list of constant values (in order of self.constants)
             params: Parameter dictionary
-        
+            t: simulation time
+
         Returns:
             dict: All variable values including computed auxiliaries
         """
@@ -306,15 +539,15 @@ class SDM:
             vals[s] = v
         for c, v in zip(self.constants, const_vals):
             vals[c] = v
-        
+
         # Ensure auxiliaries are sorted by dependency order
         if self.auxiliaries_sorted == []:
             self.auxiliaries_sorted = self.sort_auxiliaries(params)
-        
+
         # Compute auxiliaries in dependency order
         for aux in self.auxiliaries_sorted:
-            vals[aux] = self._compute_equation_value(aux, params, vals)
-        
+            vals[aux] = self._compute_equation_value(aux, params, vals, t)
+
         return vals
 
     def params_to_A_b(self, params, constants_values):
@@ -325,16 +558,16 @@ class SDM:
         n_stock = len(self.stocks)
         n_aux = len(self.auxiliaries)
         n_const = len(self.constants)
-        
+
         # Create index mappings based on the list structures
         stock_idx = {s: i for i, s in enumerate(self.stocks)}
         aux_idx = {a: i for i, a in enumerate(self.auxiliaries)}
         const_idx = {c: i for i, c in enumerate(self.constants)}
-        
+
         param_mat = np.zeros((n_stock + n_aux, n_stock + n_aux + n_const), dtype=np.float64)
         intercept_aux = np.zeros(n_aux, dtype=np.float64)
         intercept_stock = np.zeros(n_stock, dtype=np.float64)
-        
+
         for target, effects in params.items():
             for source, val in effects.items():
                 if source == 'Intercept':
@@ -350,7 +583,7 @@ class SDM:
                         target_row = n_stock + aux_idx[target]
                     else:
                         continue  # Skip if target is not in stocks or auxiliaries
-                    
+
                     # Determine source column index
                     if source in self.stocks:
                         source_col = stock_idx[source]
@@ -360,35 +593,35 @@ class SDM:
                         source_col = n_stock + n_aux + const_idx[source]
                     else:
                         continue  # Skip if source is not in stocks, auxiliaries, or constants
-                    
+
                     param_mat[target_row, source_col] = val
-        
+
         # Extract submatrices using explicit indices
         # Stock equations (rows 0:n_stock)
         stock_to_stocks = param_mat[:n_stock, :n_stock]
         stock_to_aux = param_mat[:n_stock, n_stock:n_stock+n_aux]
         stock_to_const = param_mat[:n_stock, n_stock+n_aux:]
-        
+
         # Auxiliary equations (rows n_stock:n_stock+n_aux)
         aux_to_stocks = param_mat[n_stock:n_stock+n_aux, :n_stock]
         aux_to_aux = param_mat[n_stock:n_stock+n_aux, n_stock:n_stock+n_aux]
         aux_to_const = param_mat[n_stock:n_stock+n_aux, n_stock+n_aux:]
-        
+
         # Solve for effective auxiliary influence
         I_aux = np.eye(n_aux)
         aux_system = I_aux - aux_to_aux
-        
+
         try:
             aux_system_inv = np.linalg.inv(aux_system)
         except np.linalg.LinAlgError:
             raise ValueError("Auxiliary system (I - A_aux_to_aux) is singular. Check for circular dependencies among auxiliaries.")
-        
+
         # Effective auxiliary response to stocks
         effective_aux_to_stocks = aux_system_inv @ aux_to_stocks
-        
+
         # Compute A matrix
         A = stock_to_stocks + stock_to_aux @ effective_aux_to_stocks
-        
+
         # Compute b vector
         if n_const > 0:
             # How constants affect auxiliaries (after resolving aux-aux dependencies)
@@ -399,43 +632,58 @@ class SDM:
             bias_from_const += stock_to_aux @ effective_aux_const
         else:
             bias_from_const = np.zeros(n_stock, dtype=np.float64)
-        
+
         # Auxiliary intercept contributions (after resolving aux-aux dependencies)
         effective_aux_intercept = aux_system_inv @ intercept_aux
         bias_from_aux = stock_to_aux @ effective_aux_intercept
-        
+
         # Total bias vector
         b = intercept_stock + bias_from_aux + bias_from_const
-        
+
         return A, b
 
     def sort_auxiliaries(self, params):
+        """Order the auxiliaries so that each is computed after the auxiliaries it depends on.
+
+        The dependencies of an auxiliary with a custom equation are the variables the equation
+        references; otherwise they are the sources of its linear and interaction terms in
+        ``params``. Raises ``ValueError`` naming the auxiliaries involved when they depend on
+        each other in a cycle (an algebraic loop).
         """
-        """
-        # Sort auxiliaries by dependencies, including custom equation references
-        auxiliaries_sorted = []
-        deps = {}
+        aux_set = set(self.auxiliaries)
+        remaining = {}
         for a in self.auxiliaries:
-            # Start with incoming links from params
-            dep_vars = set([d for d in params.get(a, {}) if d in self.auxiliaries])
-            # If custom equation, add all referenced variables that are auxiliaries
-            if self._equation_evaluator and self._equation_evaluator.has_custom_equation(a):
-                eq_info = self._equation_evaluator.get_equation_info(a)
-                dep_vars |= set([v for v in eq_info.get('variables_used', set()) if v in self.auxiliaries])
-            deps[a] = list(dep_vars)
-        warning_count = 0
-        while deps:
-            ready = [a for a, ds in deps.items() if not ds]
+            if a in self._eq_vars:
+                used = self._equation_evaluator.get_equation_info(a).get('variables_used', set())
+                deps = {v for v in used if v in aux_set}
+            else:
+                deps = set()
+                for key in params.get(a, {}):
+                    if key == 'Intercept' or str(key).startswith('__eq_params_'):
+                        continue
+                    parts = [p.strip() for p in key.split('*')] if '*' in key else [key]
+                    deps.update(p for p in parts if p in aux_set)
+            remaining[a] = deps
+
+        auxiliaries_sorted = []
+        while remaining:
+            ready = [a for a in self.auxiliaries if a in remaining and not remaining[a]]
             if not ready:
-                raise ValueError("Warning: Possible circular dependency among auxiliaries. Check model structure.")
+                # follow unresolved dependencies until a variable repeats -> one cycle
+                node, path = next(iter(remaining)), []
+                while node not in path:
+                    path.append(node)
+                    node = sorted(remaining[node])[0]
+                cycle = path[path.index(node):] + [node]
+                raise ValueError(
+                    "Circular dependency among auxiliaries (an algebraic loop): "
+                    + " -> ".join(cycle) + ". Auxiliaries are computed instantaneously; break the "
+                    "loop with a stock, or check that no variable name in an equation is mistyped.")
             auxiliaries_sorted.extend(ready)
             for r in ready:
-                deps.pop(r)
-            for ds in deps.values():
-                ds[:] = [d for d in ds if d not in ready]
-            warning_count += 1
-            if warning_count > 100:  # Arbitrary large number to prevent infinite loops
-                raise ValueError("Warning: Possible circular dependency among auxiliaries. Check model structure.")
+                remaining.pop(r)
+            for deps in remaining.values():
+                deps.difference_update(ready)
         return auxiliaries_sorted
 
     def evaluate_auxiliaries(self, params, df_sol):
@@ -456,13 +704,14 @@ class SDM:
         # Work on plain numpy arrays; per-cell .loc writes are pathologically slow.
         base_cols = [c for c in df_sol.columns if c != 'Time' and c not in self.auxiliaries]
         base = {c: df_sol[c].to_numpy() for c in base_cols}
+        times = np.asarray(df_sol.index, dtype=float)
         n_t = len(df_sol.index)
         aux_arrays = {aux: np.empty(n_t, dtype=np.float64) for aux in self.auxiliaries_sorted}
 
         for k in range(n_t):
             vals = {c: base[c][k] for c in base_cols}
             for aux in self.auxiliaries_sorted:
-                v = self._compute_equation_value(aux, params, vals)
+                v = self._compute_equation_value(aux, params, vals, times[k])
                 vals[aux] = v
                 aux_arrays[aux][k] = v
 
@@ -471,40 +720,92 @@ class SDM:
             df_sol_with_auxiliaries[aux] = aux_arrays[aux]
         return df_sol_with_auxiliaries
 
-    def get_intervention_effects(self):
-        """ Obtain intervention effects from a dataframe with model simulation results.
-        """
-        intervention_effects_per_voi = {voi : {} for voi in self.variable_of_interest}
+    # =========================================================================
+    # Intervention effects
+    # =========================================================================
 
+    def get_intervention_effects(self, relative_to="baseline"):
+        """Effect of each intervention on each variable of interest, per parameter sample.
+
+        Requires :meth:`run_simulations`. By default (``relative_to="baseline"``) the effect is
+        the difference, at the final time, between the run with the intervention and the
+        no-intervention baseline run with the *same* parameter sample:
+        ``VOI(intervention, t_end) - VOI(baseline, t_end)``. For models whose zero state is an
+        equilibrium (all pure causal-loop-diagram models) the baseline is zero, so this equals
+        the final value. ``relative_to=None`` returns the raw final values instead.
+
+        Returns ``{voi: {intervention: [effect per sample]}}``, each inner dict sorted by the
+        median absolute effect (largest first).
+        """
+        if relative_to not in ("baseline", None):
+            raise ValueError(f"relative_to must be 'baseline' or None, got {relative_to!r}.")
+        if getattr(self, 'df_sol_per_sample', None) is None:
+            raise ValueError("Call run_simulations() before get_intervention_effects().")
+        baseline = getattr(self, 'df_sol_baseline_per_sample', None)
+        if relative_to == "baseline" and baseline is None:
+            raise ValueError("No baseline runs found; call run_simulations() again, or pass relative_to=None.")
+
+        t_end = self.t_eval[-1]
+        n_samples = len(self.df_sol_per_sample)
+        intervention_effects_per_voi = {voi: {} for voi in self.variable_of_interest}
         for voi in self.variable_of_interest:
-            # Get the intervention effects at the final time point (compared to the implicit counterfactual where everything stays zero)
-            intervention_effects = {i_v : [self.df_sol_per_sample[n][i].loc[self.t_eval[-1], voi] 
-                                    for n in range(self.N)] for i, i_v in enumerate(self.intervention_variables)}
+            intervention_effects = {}
+            for i, i_v in enumerate(self.intervention_variables):
+                values = []
+                for n in range(n_samples):
+                    value = self.df_sol_per_sample[n][i].loc[t_end, voi]
+                    if relative_to == "baseline":
+                        value = value - baseline[n].loc[t_end, voi]
+                    values.append(value)
+                intervention_effects[i_v] = values
             # Sort the dictionary by the median intervention effect
             intervention_effects = dict(sorted(intervention_effects.items(),
-                                            key=lambda item: np.median(np.abs(item[1])), reverse=True))
+                                               key=lambda item: np.median(np.abs(item[1])), reverse=True))
 
             self.intervention_effects = intervention_effects
             intervention_effects_per_voi[voi] = intervention_effects
-        
+
         return intervention_effects_per_voi
 
+    @staticmethod
     def get_top_interventions(intervention_effects, top_plot=None):
         """ Get the names of the top interventions based on median effect. """
         # Convert intervention effects to DataFrame
         df_SA = pd.DataFrame(intervention_effects)
-        
+
         # Sort interventions by the absolute median of their effects
         sorted_columns = df_SA.abs().median().sort_values(ascending=False).index
-        
+
         # If top_plot is specified, limit to the top X interventions
         if top_plot is not None:
             sorted_columns = sorted_columns[:top_plot]
         return list(sorted_columns)
 
+    # =========================================================================
+    # Parameter sampling
+    # =========================================================================
+
+    def named_parameter_bounds(self, name):
+        """``(low, high)`` sampling range of the named parameter ``#name``."""
+        low, high = self.parameter_priors.get(name, (0.0, self.parameter_value_aux))
+        return float(low), float(high)
+
+    def _sample_named_parameters(self):
+        values = {}
+        for name in self.named_parameters:
+            low, high = self.named_parameter_bounds(name)
+            values[name] = low if high <= low else float(np.random.uniform(low, high))
+        return values
+
     def sample_model_parameters(self):
-        """ Sample from the model parameters using a bounded uniform distribution. 
+        """ Sample from the model parameters using a bounded uniform distribution.
             The possible parameters are given by the adjacency and interactions matrices.
+
+            Local equation parameters (#1, #2, ...) are drawn from [0, parameter_value_aux].
+            Named equation parameters (#name) are drawn once per call and shared by all the
+            equations using them, from their range in ``parameter_priors`` (the workbook's
+            Parameters sheet) or [0, parameter_value_aux]; they are drawn after all other
+            parameters, so models without them keep the same random sequence.
         """
         params = {var : {} for var in self.stocks_and_auxiliaries}
 
@@ -518,14 +819,15 @@ class SDM:
         par_count_stocks = 0
         par_int_count_stocks = 0
         par_int_count_auxiliaries = 0
-    
+
         for var in self.stocks_and_auxiliaries:
             # The interactions matrix is indexed by position in self.variables, which differs
             # from the position in stocks_and_auxiliaries once constants interleave with them
             i = self.variables.index(var)
             params[var]["Intercept"] = 0
 
-            # If this variable has a custom equation, add custom equation parameters, but also ensure all incoming links are present for dependency sorting
+            # If this variable has a custom equation, add custom equation parameters, but also
+            # ensure all incoming links are present for dependency sorting
             if self._equation_evaluator and self._equation_evaluator.has_custom_equation(var):
                 eq_params = self._equation_evaluator.sample_equation_parameters(var)
                 params[var][f'__eq_params_{var}__'] = eq_params
@@ -534,14 +836,6 @@ class SDM:
                 for var_2 in incoming_links:
                     if var_2 not in params[var]:
                         params[var][var_2] = 0.0
-                # Check for discrepancy between incoming links and custom equation variables
-                eq_vars = set(self.equations[var]['variables_used']) if var in self.equations else set()
-                incoming_set = set(incoming_links)
-                if eq_vars:
-                    missing_in_eq = incoming_set - eq_vars
-                    extra_in_eq = eq_vars - incoming_set
-                    if missing_in_eq or extra_in_eq:
-                        warnings.warn(f"Custom equation for '{var}': Incoming links not used in equation: {missing_in_eq if missing_in_eq else 'None'}; Variables used in equation not present as incoming links: {extra_in_eq if extra_in_eq else 'None'}")
 
             # Pairwise interactions
             for j, var_2 in enumerate(self.variables):
@@ -578,8 +872,14 @@ class SDM:
                                     par_int_count_stocks += 1
                                 if var in self.auxiliaries:
                                     params[var][var_2 + " * " + var_3] = self.interactions_matrix[i, j, k] * sample_pars_int_auxiliaries[par_int_count_auxiliaries]
-                                    par_int_count_auxiliaries += 1 
-        
+                                    par_int_count_auxiliaries += 1
+
+        # Named parameters: one draw each, shared by every equation that uses it
+        if self.named_parameters:
+            for name, value in self._sample_named_parameters().items():
+                for var in self._named_param_users[name]:
+                    params[var][self._eq_param_keys[var]][f'#{name}'] = value
+
         self.params = params
         return params
 
@@ -599,10 +899,12 @@ class SDM:
         ``(low, high)`` bounds. The bounds mirror exactly what ``sample_model_parameters``
         draws from, so a GSA samples the same prior:
 
-        - link coefficient of a non-equation stock/auxiliary: known polarity ``+`` -> ``(0, pv)``,
-          ``-`` -> ``(-pv, 0)``, unknown -> ``(-pv, pv)``, with ``pv = parameter_value_stocks``
-          for stocks and ``parameter_value_aux`` for auxiliaries;
-        - each ``#`` parameter of a custom equation: ``(0, parameter_value_aux)``;
+        - link coefficient of a non-equation stock/auxiliary (``"Target <- Source"``): known
+          polarity ``+`` -> ``(0, pv)``, ``-`` -> ``(-pv, 0)``, unknown -> ``(-pv, pv)``, with
+          ``pv = parameter_value_stocks`` for stocks and ``parameter_value_aux`` for auxiliaries;
+        - each local ``#k`` parameter of a custom equation (``"Var | #k"``): ``(0, parameter_value_aux)``;
+        - each named parameter (``"#name"``): its range in ``parameter_priors`` (the workbook's
+          Parameters sheet), else ``(0, parameter_value_aux)``; one value for all its equations;
         - interaction terms (only when the model has them) mirror the same formulas at half range.
 
         Equation variables contribute only their ``#`` parameters (their incoming-link
@@ -655,6 +957,15 @@ class SDM:
                         key = var_2 + " * " + var_3
                         add(f"{var} <- {key}", lo_i, hi_i, "interaction", var, key)
 
+        for name in self.named_parameters:
+            lo, hi = self.named_parameter_bounds(name)
+            add(f"#{name}", lo, hi, "named", None, f"#{name}")
+
+        unknown = set(bounds) - {e["name"] for e in entries}
+        if unknown:
+            warnings.warn(f"bounds given for unknown parameter(s) {sorted(unknown)}; they are ignored. "
+                          "Parameter names look like 'Target <- Source', 'Var | #1' or '#name'.")
+
         free = [e for e in entries if e["high"] > e["low"]]
         fixed = [e for e in entries if e["high"] <= e["low"]]
         return free, fixed
@@ -675,6 +986,9 @@ class SDM:
             target = entry["target"]
             if entry["kind"] == "eq":
                 params[target][f"__eq_params_{target}__"][entry["key"]] = float(value)
+            elif entry["kind"] == "named":
+                for var in self._named_param_users[entry["key"][1:]]:
+                    params[var][f"__eq_params_{var}__"][entry["key"]] = float(value)
             else:  # link or interaction
                 params[target][entry["key"]] = float(value)
 
@@ -713,30 +1027,40 @@ class SDM:
             raise ValueError(f"intervention array must have length {n}, got {out.shape}.")
         return out
 
-    def _gsa_evaluate(self, design, free, fixed, intensities, reducers, show_progress):
+    def _gsa_evaluate(self, design, free, fixed, intensities, reducers, show_progress, relative_to=None):
         """Run the model once per design row and reduce to one scalar per reducer.
 
         ``reducers`` is a dict ``{label: callable(df_solution) -> float}``; returns a dict
-        ``{label: np.ndarray}`` of outputs aligned with ``design``.
+        ``{label: np.ndarray}`` of outputs aligned with ``design``. With
+        ``relative_to="baseline"`` each output is the reducer of the intervention run minus the
+        reducer of a no-intervention run with the same parameters.
         """
+        if relative_to not in (None, "baseline"):
+            raise ValueError(f"relative_to must be None or 'baseline', got {relative_to!r}.")
         outputs = {label: np.empty(design.shape[0], dtype=float) for label in reducers}
+        zero = np.zeros_like(np.asarray(intensities, dtype=float))
         iterator = range(design.shape[0])
         if show_progress:
-            iterator = tqdm(iterator, desc="GSA: evaluating Sobol design")
-        # The per-run ">10" notice in run_SDM would flood thousands of lines; quiet stdout.
-        import contextlib, io
-        with contextlib.redirect_stdout(io.StringIO()):
+            iterator = tqdm(iterator, desc="GSA: evaluating design")
+        # Keep stdout quiet over thousands of runs (e.g. the analytical-solver notice).
+        import io
+        with self._magnitude_watch(), contextlib.redirect_stdout(io.StringIO()):
             for row_idx in iterator:
                 params = self._gsa_params_from_vector(design[row_idx], free, fixed)
                 df_sol = self.run_SDM_with_intervention_intensities(intensities, params)
+                df_base = (self.run_SDM_with_intervention_intensities(zero, params)
+                           if relative_to == "baseline" else None)
                 for label, reduce_fn in reducers.items():
-                    outputs[label][row_idx] = float(reduce_fn(df_sol))
+                    value = float(reduce_fn(df_sol))
+                    if df_base is not None:
+                        value -= float(reduce_fn(df_base))
+                    outputs[label][row_idx] = value
         return outputs
 
     def run_GSA(self, variable_of_interest=None, *, method="sobol", bounds=None, n=1024,
                 second_order=False, outcome="final", reducer=None, intervention=None,
                 n_bootstrap=200, conf_level=0.95, clip=True, ci="bca", seed=None,
-                show_progress=True):
+                show_progress=True, relative_to=None):
         """Global sensitivity analysis of the model's uncertain parameters.
 
         Three methods are available via ``method``:
@@ -763,8 +1087,10 @@ class SDM:
             Outcome variable(s); defaults to ``self.variable_of_interest``. Ignored when a
             custom ``reducer`` is supplied.
         bounds : dict, optional
-            ``{parameter_name: (low, high)}`` overrides of the default uniform priors. Use
-            ``low == high`` to fix a parameter (excluded from the indices and reported).
+            ``{parameter_name: (low, high)}`` overrides of the default uniform priors. Names
+            are ``"Target <- Source"`` (link coefficients), ``"Var | #1"`` (local equation
+            parameters) and ``"#name"`` (named parameters). Use ``low == high`` to fix a
+            parameter (excluded from the indices and reported).
         n : int
             Base Sobol sample size; total model runs = ``n*(d+2)`` (``n*(2d+2)`` with
             ``second_order``), where ``d`` is the number of free parameters. Use a power of two.
@@ -774,6 +1100,10 @@ class SDM:
             ``callable(df_solution) -> float`` overriding ``outcome`` (and ``variable_of_interest``).
         intervention : None | str | dict | array-like
             Scenario under which the outcome is measured (see ``_gsa_intensities``).
+        relative_to : None or "baseline"
+            ``None`` (default) analyses the outcome itself; ``"baseline"`` analyses the
+            intervention's effect, i.e. the outcome minus the outcome of a no-intervention run
+            with the same parameters (doubles the number of runs).
         n_bootstrap, conf_level, seed : estimator controls.
         clip : bool
             If True (default), project the indices and their bootstrap confidence intervals
@@ -821,7 +1151,8 @@ class SDM:
             reducers = {voi: gsa.make_reducer(outcome=outcome, voi=voi) for voi in voi_list}
             voi_labels = list(voi_list)
 
-        outputs = self._gsa_evaluate(design, free, fixed, intensities, reducers, show_progress)
+        outputs = self._gsa_evaluate(design, free, fixed, intensities, reducers, show_progress,
+                                     relative_to=relative_to)
 
         self._gsa_design = pd.DataFrame(design, columns=names)
         self._gsa_outputs = {k: v for k, v in outputs.items()}
@@ -846,12 +1177,13 @@ class SDM:
 
     def sample_outcomes(self, n=1000, *, variable_of_interest=None, bounds=None,
                         outcome="final", reducer=None, intervention=None, seed=None,
-                        show_progress=True):
+                        show_progress=True, relative_to=None):
         """Draw an ensemble of free-parameter samples and their scalar outcomes.
 
         Returns ``(X, y)`` where ``X`` is an ``n x d`` DataFrame of sampled free parameters
         (columns named as in :meth:`run_GSA`) and ``y`` is the length-``n`` outcome array,
-        reduced exactly as in ``run_GSA``. Convenience producer of the ensemble that
+        reduced exactly as in ``run_GSA`` (``relative_to="baseline"`` gives the effect of the
+        intervention instead of the outcome itself). Convenience producer of the ensemble that
         :func:`discover_scenarios` consumes. Uses plain Monte-Carlo (uniform) draws, not a
         Sobol design, so the rows are independent.
         """
@@ -876,7 +1208,7 @@ class SDM:
             reduce_fn = gsa.make_reducer(outcome=outcome, voi=voi)
 
         outputs = self._gsa_evaluate(design, free, fixed, intensities,
-                                     {"y": reduce_fn}, show_progress)
+                                     {"y": reduce_fn}, show_progress, relative_to=relative_to)
         return pd.DataFrame(design, columns=names), outputs["y"]
 
     def analytical_solution(self, t, x0, A, b):
@@ -890,9 +1222,7 @@ class SDM:
             self.solve_analytically = 0  # Switch to numerical solver for future iterations
 
             # Use numerical solver instead for the current iteration
-            return solve_ivp(self.solve_sdm_linear, self.t_span, x0, args=(A, b),
-                                   t_eval=self.t_eval, jac=self.jac_linear,
-                                   method=self.solver, rtol=1e-6, atol=1e-6).y.T
+            return self._integrate(self.solve_sdm_linear, x0, (A, b), jac=self.jac_linear)
 
         I = np.identity(A.shape[0])
         A_inv_b = np.matmul(A_inv, b)
@@ -920,9 +1250,12 @@ class SDM:
         return A
 
     def compare_interventions_table(self, intervention_effects, n_bootstraps=200):
-        """Compares interventions using the percentage of samples 
+        """Compares interventions using the percentage of samples
         where one intervention is greater than the other, Cliff's Delta,
         and adds 95% bootstrapped confidence intervals for % Greater.
+
+        ``intervention_effects`` is one VOI's entry of :meth:`get_intervention_effects`
+        (by default baseline-subtracted effects); magnitudes are compared.
         """
         temp = []
         comparison_results = []
@@ -962,13 +1295,23 @@ class SDM:
             headers=["Intervention A", "Intervention B", "% Greater", "95% CI (% Greater)", "Cliff's Delta"],
             tablefmt="grid"
         ))
-        
-    def run_SA(self, outcome_var, int_var, cut_off_SA_importance=0.1, n_bootstraps=200):
+
+    def run_SA(self, outcome_var, int_var, cut_off_SA_importance=0.1, n_bootstraps=200, relative_to="baseline"):
         """ Run sensitivity analysis for the model parameters, either for a specific intervention (int_var) or over all interventions,
             and compute bootstrap confidence intervals for correlation coefficients.
-            
-        Also includes custom equation parameters if equations are defined.
-        """  
+
+        The effect is measured as in :meth:`get_intervention_effects`: by default the change at
+        the final time relative to the no-intervention baseline run (``relative_to=None`` uses
+        the raw final value). With ``outcome_var=None`` the effect is the mean absolute change
+        over all model variables. Custom equation parameters are included (``p1->Var`` for local
+        ``#1`` parameters, ``#name`` for named parameters).
+        """
+        if relative_to not in ("baseline", None):
+            raise ValueError(f"relative_to must be 'baseline' or None, got {relative_to!r}.")
+        baseline = getattr(self, 'df_sol_baseline_per_sample', None) if relative_to == "baseline" else None
+        if relative_to == "baseline" and baseline is None:
+            raise ValueError("No baseline runs found; call run_simulations() again, or pass relative_to=None.")
+
         if int_var is None:
             loop_over = self.intervention_variables
         else:
@@ -982,22 +1325,21 @@ class SDM:
                 if source.startswith('__eq_params_'):
                     continue
                 param_names.append(source + "->" + target)
-        
-        # Add custom equation parameter names if they exist
-        # Named as p1->Variable, p2->Variable, etc. to follow the same pattern as regular params
+
+        # Custom equation parameters: p<k>->Variable for local #k, #name for named ones
         eq_param_names = []
         if self._equation_evaluator:
             for var in self.stocks_and_auxiliaries:
                 if self._equation_evaluator.has_custom_equation(var):
-                    n_params = self.equations[var]['n_parameters']
-                    for p_idx in range(n_params):
-                        eq_param_names.append(f"p{p_idx+1}->{var}")
+                    for idx in self.equations[var]['parameter_indices']:
+                        eq_param_names.append(f"p{idx}->{var}")
+            eq_param_names += [f"#{name}" for name in self.named_parameters]
 
         all_param_names = param_names + eq_param_names
 
         for i_v in loop_over:
             i = self.intervention_variables.index(i_v)
-            for n in range(self.N):
+            for n in range(len(self.df_sol_per_sample)):
                 # Collect regular parameters (scalars)
                 params_curr = []
                 for target in self.param_samples[i_v]:
@@ -1010,39 +1352,49 @@ class SDM:
                             params_curr.extend(val)
                         else:
                             params_curr.append(float(val))
-                
+
                 # Collect equation parameters (dicts stored per sample)
                 eq_params_curr = []
+                named_values = {}
                 if self._equation_evaluator:
                     for var in self.stocks_and_auxiliaries:
                         eq_key = f'__eq_params_{var}__'
                         if var in self.param_samples[i_v] and eq_key in self.param_samples[i_v][var]:
                             eq_item = self.param_samples[i_v][var][eq_key][n]
-                            # If dict (e.g., {'#1': val1, '#2': val2}), flatten in key order
                             if isinstance(eq_item, dict):
-                                # Sort keys by integer in '#N'
-                                for k in sorted(eq_item.keys(), key=lambda x: int(x.strip('#'))):
-                                    eq_params_curr.append(float(eq_item[k]))
+                                for idx in self.equations[var]['parameter_indices']:
+                                    eq_params_curr.append(float(eq_item[f'#{idx}']))
+                                for name in self.equations[var].get('named_parameters', []):
+                                    named_values.setdefault(name, float(eq_item[f'#{name}']))
                             # If array/list, flatten as before
                             elif hasattr(eq_item, '__iter__') and not isinstance(eq_item, str):
                                 eq_params_curr.extend([float(x) for x in eq_item])
                             else:
                                 eq_params_curr.append(float(eq_item))
+                    eq_params_curr += [named_values.get(name, np.nan) for name in self.named_parameters]
 
                 all_params = params_curr + eq_params_curr
 
+                df_int = self.df_sol_per_sample[n][i]
+                last = df_int.index[-1]
                 if outcome_var is None:
-                    eff_size = self.df_sol_per_sample[n][i].loc[self.df_sol_per_sample[n][i].Time == self.t_eval[-1], :].abs().mean().mean()
-                    new_row = np.array(all_params + [float(eff_size)])
+                    cols = [c for c in df_int.columns if c != 'Time']
+                    change = df_int.loc[last, cols].astype(float)
+                    if baseline is not None:
+                        change = change - baseline[n].loc[last, cols].astype(float)
+                    eff_size = float(np.mean(np.abs(change.values)))
                 else:
-                    eff_size = abs(self.df_sol_per_sample[n][i].loc[self.df_sol_per_sample[n][i].Time == self.t_eval[-1], outcome_var])
-                    new_row = np.array(all_params + [float(eff_size.iloc[0])])
+                    change = float(df_int.loc[last, outcome_var])
+                    if baseline is not None:
+                        change -= float(baseline[n].loc[last, outcome_var])
+                    eff_size = abs(change)
+                new_row = np.array(all_params + [float(eff_size)])
 
                 df_SA_new = pd.DataFrame(new_row, index=all_param_names + ["Effect"]).T
                 df_SA_new['intervention_variable'] = i_v
 
                 if n == 0 and i_v == loop_over[0]:
-                   df_SA = df_SA_new
+                    df_SA = df_SA_new
                 else:
                     df_SA = pd.concat([df_SA, df_SA_new], ignore_index=True)
 
@@ -1069,12 +1421,12 @@ class SDM:
             upper = np.percentile(bootstrapped_corrs, 97.5)
 
             mean_per_int = [scipy.stats.spearmanr(df_SA.loc[df_SA.intervention_variable==i_v, col],
-                                                  df_SA.loc[df_SA.intervention_variable==i_v, "Effect"]).statistic 
+                                                  df_SA.loc[df_SA.intervention_variable==i_v, "Effect"])[0]
                                                   for i_v in loop_over]
 
             if abs(rho) > cut_off_SA_importance:
-                results.append([col, round(rho, 2), 
-                                #round(pval, 3), 
+                results.append([col, round(rho, 2),
+                                #round(pval, 3),
                                 f"[{round(lower, 2)}, {round(upper, 2)}]",
                                 round(np.mean(mean_per_int), 2),
                                 round(np.std(mean_per_int), 2)])
@@ -1083,8 +1435,8 @@ class SDM:
         results.sort(key=lambda x: abs(x[1]), reverse=True)
 
         #headers = ["Variable", "Global rho", "p-value", "95% CI (bootstrap)"]
-        headers = ["Link", "Rho", "95% CI (bootstrap)", "Mean Rho per Int", "SD Rho per Int"] #"p-value", 
-        
+        headers = ["Link", "Rho", "95% CI (bootstrap)", "Mean Rho per Int", "SD Rho per Int"] #"p-value",
+
         print(tabulate(results, headers=headers, tablefmt="pretty"))
 
         # Also return the raw correlation dictionary and df for downstream use
