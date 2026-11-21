@@ -74,13 +74,23 @@ class ScenarioResult:
     splitting_variables: List[str] = field(default_factory=list)
     rules: List[str] = field(default_factory=list)
     tree: object = None                                # fitted CART estimator (CART only)
+    default_min_coverage: float = 0.5                  # coverage the recommended box must keep
 
     @property
     def box(self) -> Box:
-        """The recommended box (highest density among those returned)."""
+        """The recommended box: the densest box that keeps at least ``default_min_coverage``
+        (50% by default) of the cases of interest; if no box reaches that coverage, the densest
+        box overall.
+
+        PRIM's last peels are typically tiny, near-pure boxes that describe only a small share
+        of the cases of interest, so "highest density" alone is rarely a useful summary. Use
+        :meth:`select_box` or the peeling ``trajectory`` to choose another trade-off, or change
+        ``result.default_min_coverage``.
+        """
         if not self.boxes:
             raise ValueError("No boxes were found.")
-        return max(self.boxes, key=lambda b: (b.density, b.coverage))
+        eligible = [b for b in self.boxes if b.coverage >= self.default_min_coverage - 1e-12]
+        return max(eligible or self.boxes, key=lambda b: (b.density, b.coverage))
 
     def select_box(self, min_coverage: float = 0.0) -> Box:
         """Highest-density box whose coverage is at least ``min_coverage``."""
@@ -273,9 +283,10 @@ def discover_scenarios(X, y, *, threshold=None, direction="below", predicate=Non
     Returns
     -------
     ScenarioResult
-        With ``.boxes`` (the regions found), ``.box`` (the recommended one), ``.trajectory``
-        (PRIM coverage/density per peel step), and for CART ``.splitting_variables``,
-        ``.rules`` and ``.tree``.
+        With ``.boxes`` (the regions found), ``.box`` (the recommended one: the densest box
+        that keeps at least 50% of the cases of interest, see :attr:`ScenarioResult.box`),
+        ``.select_box(min_coverage)``, ``.trajectory`` (PRIM coverage/density per peel step),
+        and for CART ``.splitting_variables``, ``.rules`` and ``.tree``.
     """
     if not isinstance(X, pd.DataFrame):
         X = pd.DataFrame(np.asarray(X))
